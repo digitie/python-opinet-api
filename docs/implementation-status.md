@@ -228,3 +228,16 @@ raw = to_json_safe_raw(station.raw)
 | raw JSON-safe | nested `OIL_PRICE`가 plain list/dict로 변환되고 `json.dumps` 가능 |
 | PRODNM 없는 Station | 요청 `prodcd`는 product code로 보존되고 provider product name은 `None` |
 | Pydantic 동작 | DTO가 `BaseModel`이며 frozen/extra forbid/model_dump 동작 |
+
+---
+
+## PEP 561 typed package
+
+2026-05-06에 PEP 561 typed package 지원을 추가했습니다.
+
+- `opinet/py.typed` marker를 추가했습니다.
+- `pyproject.toml`의 setuptools package data에 `py.typed`를 등록했습니다.
+- dev extra에 packaging smoke용 `build`, `wheel`, `setuptools>=68`를 명시했습니다.
+- `tests/test_pep561_packaging.py`에서 wheel/sdist를 빌드하고, 각 산출물을 임시 venv에 설치한 뒤 `import opinet`, `import opinet.normalized`, downstream mypy reveal smoke를 실행합니다.
+
+이 테스트는 Pydantic DTO와 기존 public export가 설치 환경에서도 typed package로 보이는지 확인합니다.

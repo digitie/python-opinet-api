@@ -725,6 +725,13 @@ payload = station_record.model_dump(mode="json")  # Pydantic JSON mode
 
 `NormalizedFuelRegionCode`는 OpiNet 지역 코드의 level, parent sido, BJD sido prefix까지만 제공합니다. OpiNet 시군구 4자리 code를 법정동 10자리 code로 자동 변환하지 않습니다.
 
+### PEP 561 typing
+
+pyopinet은 PEP 561 typed package입니다. 배포 산출물에는 `opinet/py.typed` marker가 포함되며, downstream 프로젝트의 mypy가 `opinet`과 `opinet.normalized` 타입 정보를 직접 읽을 수 있습니다.
+
+패키징 테스트는 wheel과 sdist를 각각 임시 venv에 설치한 뒤 `import opinet`, `import opinet.normalized`, downstream mypy smoke를 확인합니다.
+
 | 날짜 | 내용 |
 |---|---|
 | 2026-05-06 (rev5) | `opinet.normalized` Pydantic DTO layer 추가. `NormalizedFuelAverage`, `NormalizedFuelStation`, `NormalizedFuelRegionCode`, KST datetime helper, JSON-safe raw 변환 helper, 모델별 `to_normalized()` 문서화. |
+| 2026-05-06 (rev6) | PEP 561 `py.typed` marker와 package data 설정 추가. wheel/sdist 설치 후 import와 downstream mypy smoke 테스트 추가. |

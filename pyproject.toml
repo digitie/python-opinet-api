@@ -17,15 +17,21 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = [
+    "build",
     "pytest>=7.0",
     "responses>=0.23",
     "pytest-cov",
+    "setuptools>=68",
     "mypy",
     "types-requests",
+    "wheel",
 ]
 
 [tool.setuptools.packages.find]
 include = ["opinet*"]
+
+[tool.setuptools.package-data]
+opinet = ["py.typed"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
