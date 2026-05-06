@@ -17,6 +17,20 @@ class ProductCode(StrEnum):
     LPG = "K015"
 
 
+class FuelType(StrEnum):
+    """Canonical fuel types for application-facing integrations."""
+
+    GASOLINE = "gasoline"
+    PREMIUM_GASOLINE = "premium_gasoline"
+    DIESEL = "diesel"
+    LPG = "lpg"
+    KEROSENE = "kerosene"
+    UNKNOWN = "unknown"
+
+
+CanonicalFuelType = FuelType
+
+
 class BrandCode(StrEnum):
     """Opinet brand codes."""
 
@@ -48,6 +62,18 @@ class StationType(StrEnum):
 
 
 ALDDLE_BRANDS = frozenset({BrandCode.RTE, BrandCode.RTX, BrandCode.NHO})
+
+PRODUCT_CODE_TO_FUEL_TYPE: dict[ProductCode, FuelType] = {
+    ProductCode.GASOLINE: FuelType.GASOLINE,
+    ProductCode.GASOLINE_PREMIUM: FuelType.PREMIUM_GASOLINE,
+    ProductCode.DIESEL: FuelType.DIESEL,
+    ProductCode.KEROSENE: FuelType.KEROSENE,
+    ProductCode.LPG: FuelType.LPG,
+}
+
+FUEL_TYPE_TO_PRODUCT_CODE: dict[FuelType, ProductCode] = {
+    fuel_type: product_code for product_code, fuel_type in PRODUCT_CODE_TO_FUEL_TYPE.items()
+}
 
 OPINET_TO_BJD: dict[str, str] = {
     "01": "11",
@@ -82,6 +108,26 @@ def is_alddle(brand: BrandCode | str | None) -> bool:
         return BrandCode(brand) in ALDDLE_BRANDS
     except ValueError:
         return False
+
+
+def product_code_to_fuel_type(product_code: ProductCode | str) -> FuelType:
+    """Map an Opinet product code to a canonical application fuel type."""
+    try:
+        normalized = ProductCode(product_code)
+    except ValueError as exc:
+        raise OpinetInvalidParameterError(f"unknown Opinet product code: {product_code!r}") from exc
+    return PRODUCT_CODE_TO_FUEL_TYPE[normalized]
+
+
+def fuel_type_to_product_code(fuel_type: FuelType | str) -> ProductCode:
+    """Map a canonical fuel type to the corresponding Opinet product code."""
+    try:
+        normalized = FuelType(fuel_type)
+    except ValueError as exc:
+        raise OpinetInvalidParameterError(f"unknown fuel type: {fuel_type!r}") from exc
+    if normalized is FuelType.UNKNOWN:
+        raise OpinetInvalidParameterError("FuelType.UNKNOWN cannot be mapped to an Opinet product code")
+    return FUEL_TYPE_TO_PRODUCT_CODE[normalized]
 
 
 def opinet_sido_to_bjd(opinet_code: str) -> str:

@@ -95,3 +95,86 @@ pytest -m live --run-live
 4. fixture는 실제 응답처럼 문자열 값을 유지합니다.
 5. happy path, empty result, error response, 파라미터 검증 테스트를 추가합니다.
 6. README와 이 문서를 갱신합니다.
+
+---
+
+## 공용 normalized layer 현황
+
+2026-05-06 기준으로 기존 public API를 유지하면서 optional/additive normalized layer를 추가했습니다. 이 layer는 OpiNet provider row를 여러 프로젝트에서 바로 재사용할 수 있게 하는 공용 해석 계층이며, 애플리케이션별 DB 저장, ETL cache, serving table, 서비스 enum 정책은 포함하지 않습니다.
+
+### 추가된 public surface
+
+| 영역 | 구현 |
+|---|---|
+| canonical 유종 | `FuelType` 및 `CanonicalFuelType` alias |
+| 유종 mapping | `product_code_to_fuel_type()`, `fuel_type_to_product_code()` |
+| 좌표 value object | `KatecPoint(x, y)`, `Wgs84Point(lon, lat)`, `StationCoordinates` |
+| raw payload | `AvgPrice.raw`, `Station.raw`, `StationDetail.raw`, `OilPrice.raw`, `AreaCode.raw` |
+| Station product context | `Station.product_code`, `Station.product_name` |
+| Station trade context | `Station.trade_date`, `Station.trade_time` |
+| Station normalized helpers | `provider_station_id`, `provider_product_code`, `provider_product_name`, `fuel_type`, `brand_code`, `coordinates` |
+| AvgPrice normalized helpers | `provider_product_code`, `provider_product_name`, `fuel_type` |
+| OilPrice helper | `provider_product_code`, `fuel_type` |
+| AreaCode helpers | `code_level`, `parent_sido_code`, `bjd_sido_prefix` |
+
+### 호환성 원칙
+
+- 기존 dataclass 필드는 순서를 유지했습니다.
+- 새 선택 필드는 기존 필드 뒤에 추가했습니다.
+- 모든 model의 `raw`는 마지막 dataclass 필드입니다.
+- `raw`는 읽기 전용 mapping이며, nested `OIL_PRICE`는 tuple과 read-only mapping으로 가능한 한 원형 문자열 값을 보존합니다.
+- `certkey`, `api_key`, `authorization`, `x-api-key` 같은 인증 관련 key는 raw에서 제외합니다.
+
+### request context 규칙
+
+`lowTop10.do`와 `aroundAll.do`의 Station row에는 `PRODCD`/`PRODNM`이 없는 경우가 많습니다.
+
+- row에 `PRODCD`가 있으면 응답 값을 `Station.product_code`로 사용합니다.
+- row에 `PRODCD`가 없으면 요청에 사용한 `prodcd`를 `Station.product_code`에 채웁니다.
+- row에 `PRODNM`이 있으면 `Station.product_name`에 보존합니다.
+- row에 `TRADE_DT`/`TRADE_TM`이 있으면 `Station.trade_date`/`Station.trade_time`으로 변환합니다.
+- 필드가 없으면 `product_name`, `trade_date`, `trade_time`은 `None`입니다.
+
+### 검증 케이스
+
+`tests/test_normalized_models.py`에 fixture 기반 회귀 테스트를 추가했습니다.
+
+| 케이스 | 검증 |
+|---|---|
+| ProductCode ↔ FuelType | gasoline, premium_gasoline, diesel, lpg, kerosene roundtrip |
+| mapping 실패 | 알 수 없는 product code, 알 수 없는 fuel type, `FuelType.UNKNOWN` 역변환 실패 |
+| AreaCode | `01`, `0113`, `001`, 미확인 시도 code |
+| BJD prefix | `AreaCode.bjd_sido_prefix`가 `opinet_sido_to_bjd` 기반으로 동작 |
+| 좌표 value object | 기존 float 필드 유지 및 `Station.coordinates` 제공 |
+| Station request product | `lowTop10.do`, `aroundAll.do` 요청 `prodcd`가 Station에 보존 |
+| Station response product | 응답 `PRODCD`가 있으면 요청 값보다 우선 |
+| Station trade context | 응답 `TRADE_DT`/`TRADE_TM` 문자열을 date/time으로 변환 |
+| raw payload | 타입 변환 전 문자열 값 보존, top-level 및 nested raw read-only 확인 |
+| raw shape | mapping이 아닌 raw payload는 명시적으로 실패 |
+
+### 사용 예시
+
+```python
+from opinet import OpinetClient, ProductCode
+
+client = OpinetClient()
+station = client.search_stations_around(
+    wgs84=(127.0276, 37.4979),
+    prodcd=ProductCode.DIESEL,
+)[0]
+
+record = {
+    "provider_station_id": station.provider_station_id,
+    "provider_product_code": station.provider_product_code,
+    "fuel_type": station.fuel_type.value,
+    "brand_code": station.brand_code,
+    "price": station.price,
+    "trade_date": station.trade_date,
+    "trade_time": station.trade_time,
+    "lon": station.coordinates.wgs84.lon,
+    "lat": station.coordinates.wgs84.lat,
+    "raw_price": station.raw.get("PRICE"),
+}
+```
+
+이 예시는 pyopinet의 normalized 모델만 사용합니다. 저장 schema, cache 전략, raw 보관 여부는 호출 애플리케이션의 책임입니다.

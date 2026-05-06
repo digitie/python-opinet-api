@@ -112,6 +112,7 @@ def test_lowest_price_types_and_params(client, load_fixture):
         {"cnt": 21},
         {"cnt": 10, "area": "1"},
         {"cnt": 10, "area": "001"},
+        {"cnt": 10, "area": "99"},
         {"cnt": 10, "area": "abcd"},
     ],
 )
@@ -284,7 +285,7 @@ def test_area_codes_sido_query(client, load_fixture):
     assert query["area"] == ["01"]
 
 
-@pytest.mark.parametrize("sido", ["1", "001", "ab"])
+@pytest.mark.parametrize("sido", ["1", "001", "ab", "12", "99"])
 def test_area_codes_invalid_sido(client, sido):
     with pytest.raises(OpinetInvalidParameterError):
         client.get_area_codes(sido)

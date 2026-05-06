@@ -9,7 +9,7 @@ from typing import Any
 
 from ._convert import strip_or_none, to_bool_yn, to_date, to_float_or_none, to_time
 from ._http import _OpinetHttp
-from .codes import BrandCode, ProductCode, SortOrder, StationType
+from .codes import BrandCode, ProductCode, SortOrder, StationType, opinet_sido_to_bjd
 from .exceptions import OpinetAuthError, OpinetInvalidParameterError, OpinetNoDataError, OpinetServerError
 from .models import AreaCode, AvgPrice, OilPrice, Station, StationDetail
 
@@ -72,6 +72,24 @@ def _product_code(value: Any) -> ProductCode:
     if text is None:
         raise ValueError("PRODCD is required")
     return ProductCode(text)
+
+
+def _optional_product_code(value: Any) -> ProductCode | None:
+    text = strip_or_none(value)
+    return ProductCode(text) if text is not None else None
+
+
+def _coerce_product_code(value: ProductCode | str, field: str = "prodcd") -> ProductCode:
+    try:
+        return ProductCode(value)
+    except ValueError as exc:
+        raise OpinetInvalidParameterError(f"{field} must be a valid Opinet product code") from exc
+
+
+def _validate_area_param(area: str) -> None:
+    if len(area) not in (2, 4) or not area.isdigit():
+        raise OpinetInvalidParameterError("area must be a 2-digit sido or 4-digit sigungu code")
+    opinet_sido_to_bjd(area if len(area) == 2 else area[:2])
 
 
 def _station_type(value: Any) -> StationType:
@@ -147,6 +165,7 @@ class OpinetClient:
                         product_name=str(strip_or_none(row.get("PRODNM")) or ""),
                         price=_require_float(row.get("PRICE"), "PRICE", endpoint),
                         diff=_require_float(row.get("DIFF"), "DIFF", endpoint),
+                        raw=row,
                     )
                 )
             except (ValueError, KeyError) as exc:
@@ -155,7 +174,7 @@ class OpinetClient:
 
     def get_lowest_price_top20(
         self,
-        prodcd: ProductCode,
+        prodcd: ProductCode | str,
         cnt: int = 10,
         area: str | None = None,
     ) -> list[Station]:
@@ -165,15 +184,16 @@ class OpinetClient:
         """
         if not 1 <= cnt <= 20:
             raise OpinetInvalidParameterError("cnt must be between 1 and 20")
-        if area is not None and (len(area) not in (2, 4) or not area.isdigit()):
-            raise OpinetInvalidParameterError("area must be a 2-digit sido or 4-digit sigungu code")
+        if area is not None:
+            _validate_area_param(area)
         endpoint = "lowTop10.do"
-        params: dict[str, Any] = {"prodcd": ProductCode(prodcd).value, "cnt": cnt}
+        product_code = _coerce_product_code(prodcd)
+        params: dict[str, Any] = {"prodcd": product_code.value, "cnt": cnt}
         if area is not None:
             params["area"] = area
         rows = _normalize_oil(self._require_http().get(endpoint, params=params), endpoint)
         self._handle_empty(rows, endpoint)
-        return [self._build_station(row, endpoint) for row in rows]
+        return [self._build_station(row, endpoint, request_product_code=product_code) for row in rows]
 
     def search_stations_around(
         self,
@@ -181,7 +201,7 @@ class OpinetClient:
         wgs84: tuple[float, float] | None = None,
         katec: tuple[float, float] | None = None,
         radius_m: int = 5000,
-        prodcd: ProductCode = ProductCode.GASOLINE,
+        prodcd: ProductCode | str = ProductCode.GASOLINE,
         sort: SortOrder = SortOrder.PRICE,
     ) -> list[Station]:
         """주어진 좌표 반경 내 주유소를 검색한다.
@@ -203,6 +223,7 @@ class OpinetClient:
             self._validate_pair(katec, "katec")
             x, y = float(katec[0]), float(katec[1])
 
+        product_code = _coerce_product_code(prodcd)
         endpoint = "aroundAll.do"
         rows = _normalize_oil(
             self._require_http().get(
@@ -211,14 +232,14 @@ class OpinetClient:
                     "x": x,
                     "y": y,
                     "radius": radius_m,
-                    "prodcd": ProductCode(prodcd).value,
+                    "prodcd": product_code.value,
                     "sort": SortOrder(sort).value,
                 },
             ),
             endpoint,
         )
         self._handle_empty(rows, endpoint)
-        return [self._build_station(row, endpoint) for row in rows]
+        return [self._build_station(row, endpoint, request_product_code=product_code) for row in rows]
 
     def get_station_detail(self, uni_id: str) -> StationDetail:
         """주유소 ID로 상세정보를 조회한다.
@@ -242,6 +263,8 @@ class OpinetClient:
         """
         if sido is not None and (len(sido) != 2 or not sido.isdigit()):
             raise OpinetInvalidParameterError("sido must be a 2-digit code")
+        if sido is not None:
+            opinet_sido_to_bjd(sido)
         endpoint = "areaCode.do"
         params = {"area": sido} if sido is not None else None
         rows = _normalize_oil(self._require_http().get(endpoint, params=params), endpoint)
@@ -252,7 +275,7 @@ class OpinetClient:
             name = strip_or_none(row.get("AREA_NM"))
             if code is None or name is None:
                 raise OpinetServerError(f"{endpoint}: AREA_CD and AREA_NM are required")
-            parsed.append(AreaCode(code=code, name=name))
+            parsed.append(AreaCode(code=code, name=name, raw=row))
         return parsed
 
     def _validate_pair(self, coords: tuple[float, float], name: str) -> None:
@@ -261,11 +284,18 @@ class OpinetClient:
         if not all(isfinite(float(value)) for value in coords):
             raise OpinetInvalidParameterError(f"{name} coordinate values must be finite")
 
-    def _build_station(self, row: dict[str, Any], endpoint: str) -> Station:
+    def _build_station(
+        self,
+        row: dict[str, Any],
+        endpoint: str,
+        *,
+        request_product_code: ProductCode | None = None,
+    ) -> Station:
         try:
             katec_x = _require_float(row.get("GIS_X_COOR"), "GIS_X_COOR", endpoint)
             katec_y = _require_float(row.get("GIS_Y_COOR"), "GIS_Y_COOR", endpoint)
             lon, lat = _katec_to_wgs84(katec_x, katec_y)
+            product_code = _optional_product_code(row.get("PRODCD")) or request_product_code
             return Station(
                 uni_id=str(row["UNI_ID"]),
                 name=str(strip_or_none(row.get("OS_NM")) or ""),
@@ -278,6 +308,11 @@ class OpinetClient:
                 lon=lon,
                 lat=lat,
                 distance_m=to_float_or_none(row.get("DISTANCE")),
+                product_code=product_code,
+                product_name=strip_or_none(row.get("PRODNM")),
+                trade_date=to_date(row.get("TRADE_DT")),
+                trade_time=to_time(row.get("TRADE_TM")),
+                raw=row,
             )
         except (ValueError, KeyError) as exc:
             raise _parse_error(endpoint, exc) from exc
@@ -313,6 +348,7 @@ class OpinetClient:
                 has_cvs=to_bool_yn(row.get("CVS_YN")),
                 is_kpetro=to_bool_yn(row.get("KPETRO_YN")),
                 prices=prices,
+                raw=row,
             )
         except (ValueError, KeyError) as exc:
             raise _parse_error(endpoint, exc) from exc
@@ -324,6 +360,7 @@ class OpinetClient:
                 price=to_float_or_none(row.get("PRICE")),
                 trade_date=_require_date(row.get("TRADE_DT"), "TRADE_DT", endpoint),
                 trade_time=_require_time(row.get("TRADE_TM"), "TRADE_TM", endpoint),
+                raw=row,
             )
         except (ValueError, KeyError) as exc:
             raise _parse_error(endpoint, exc) from exc

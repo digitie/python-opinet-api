@@ -546,3 +546,132 @@ pytest --cov=opinet --cov-fail-under=90
 | 2026-04-30 (rev3) | 공식 5개 엔드포인트 구현, fixture 기반 네트워크-free 테스트 115개, mypy/coverage 검증, 반복 실수 방지 체크리스트 추가. |
 | 2026-04-30 (rev2) | 응답 데이터 Python 네이티브 타입 변환(`date`/`time`/`float`/`bool`/enum) 명시. 시도코드 ↔ 법정동코드 매핑 추가. |
 | 2026-04-30 (rev1) | 초기 명세서 작성. 공식 사이트 기준 5개 API 검증. 시도코드/필드 의미 정정. |
+
+
+---
+
+## 공용 normalized layer
+
+pyopinet은 OpiNet 원본 응답을 Python 타입으로 변환한 기존 모델을 유지하면서, 여러 프로젝트에서 공통으로 재사용하기 좋은 normalized 필드도 함께 제공합니다. 이 계층은 OpiNet 자체의 도메인 해석만 담당합니다. DB 저장 방식, ETL cache, 서비스별 enum 정책, raw/serving table 설계는 각 애플리케이션에서 결정하면 됩니다.
+
+### canonical 유종
+
+`ProductCode`는 OpiNet provider code를 보존하고, `FuelType`은 앱에서 안정적으로 쓰기 좋은 문자열 값을 제공합니다.
+
+```python
+from opinet import FuelType, ProductCode, fuel_type_to_product_code, product_code_to_fuel_type
+
+product_code_to_fuel_type(ProductCode.GASOLINE)          # FuelType.GASOLINE
+product_code_to_fuel_type(ProductCode.GASOLINE_PREMIUM)  # FuelType.PREMIUM_GASOLINE
+product_code_to_fuel_type(ProductCode.DIESEL)            # FuelType.DIESEL
+product_code_to_fuel_type(ProductCode.LPG)               # FuelType.LPG
+product_code_to_fuel_type(ProductCode.KEROSENE)          # FuelType.KEROSENE
+
+FuelType.GASOLINE.value          # "gasoline"
+FuelType.PREMIUM_GASOLINE.value  # "premium_gasoline"
+FuelType.DIESEL.value            # "diesel"
+FuelType.LPG.value               # "lpg"
+FuelType.KEROSENE.value          # "kerosene"
+
+fuel_type_to_product_code(FuelType.DIESEL)  # ProductCode.DIESEL
+```
+
+알 수 없는 provider code나 `FuelType.UNKNOWN`을 역변환하려는 경우에는 `OpinetInvalidParameterError`가 발생합니다.
+
+### Station normalized 필드
+
+`lowTop10.do`와 `aroundAll.do`의 Station 응답은 OpiNet row에 `PRODCD`가 없는 경우가 많습니다. 이때 pyopinet은 요청에 사용한 `prodcd`를 `Station.product_code`에 채웁니다. 응답 row에 `PRODCD`가 실제로 있으면 응답 값을 우선합니다.
+
+```python
+from opinet import OpinetClient, ProductCode
+
+client = OpinetClient()
+
+stations = client.get_lowest_price_top20(ProductCode.GASOLINE, cnt=10)
+station = stations[0]
+
+station.product_code           # ProductCode.GASOLINE, 요청 context에서 보존
+station.product_name           # 응답 PRODNM이 없으면 None
+station.provider_product_code  # "B027"
+station.provider_product_name  # 응답 PRODNM 또는 None
+station.fuel_type              # FuelType.GASOLINE
+station.provider_station_id    # OpiNet UNI_ID
+station.brand_code             # OpiNet POLL_DIV_CO/POLL_DIV_CD 원문 code
+```
+
+최저가/주변검색 응답 row에 `TRADE_DT` 또는 `TRADE_TM`이 실제로 포함되면 `Station.trade_date`와 `Station.trade_time`에 각각 `datetime.date`, `datetime.time`으로 노출됩니다. 필드가 없으면 `None`입니다.
+
+### 좌표 value object
+
+기존 호환 필드인 `station.katec_x`, `station.katec_y`, `station.lon`, `station.lat`는 그대로 유지됩니다. 새 코드에서는 `station.coordinates`를 사용하면 좌표 순서를 더 명확히 다룰 수 있습니다.
+
+```python
+coords = station.coordinates
+
+coords.katec.x, coords.katec.y      # KATEC (x, y), meters
+coords.wgs84.lon, coords.wgs84.lat  # WGS84 (lon, lat), degrees
+
+coords.katec.as_x_y()      # (x, y)
+coords.wgs84.as_lon_lat()  # (lon, lat)
+```
+
+`KatecPoint`, `Wgs84Point`, `StationCoordinates`는 모두 finite float만 허용합니다. WGS84 tuple order는 항상 `(lon, lat)`입니다.
+
+### AreaCode helper
+
+`AreaCode`는 OpiNet code level과 BJD 시도 prefix를 명시적으로 제공합니다. 시도는 2자리, 시군구는 4자리입니다. 시군구 4자리 OpiNet code를 법정동 10자리 code로 자동 변환할 수는 없으며, pyopinet은 그런 변환을 추정하지 않습니다.
+
+```python
+area = client.get_area_codes("01")[0]
+
+area.code_level        # "sigungu"
+area.parent_sido_code  # "01"
+area.bjd_sido_prefix   # "11"
+```
+
+잘못된 길이의 code나 미확인 OpiNet 시도 code는 `OpinetInvalidParameterError`로 실패합니다.
+
+### raw payload 보존
+
+`AvgPrice`, `Station`, `StationDetail`, `OilPrice`, `AreaCode`는 마지막 dataclass 필드로 `raw`를 가집니다. `raw`에는 타입 변환 전 원본 row payload가 보존됩니다. 숫자, 날짜, 시간도 OpiNet 응답처럼 문자열입니다.
+
+```python
+avg = client.get_national_average_price()[0]
+
+avg.price            # 1919.44, float
+avg.trade_date       # datetime.date(2025, 7, 23)
+avg.raw["PRICE"]     # "1919.44", provider 원문 문자열
+avg.raw["TRADE_DT"]  # "20250723"
+```
+
+`raw`는 읽기 전용 mapping입니다. `StationDetail.raw["OIL_PRICE"]`처럼 nested `OIL_PRICE`가 있으면 가능한 한 원형 row를 보존하되, 내부 mapping도 읽기 전용으로 제공합니다. `certkey`, `api_key`, `authorization` 같은 인증 관련 key는 raw에 남기지 않습니다.
+
+### normalized 저장 예시
+
+아래 예시는 앱별 adapter를 최소화하고, pyopinet의 공용 해석 결과를 그대로 저장 계층에 넘기는 형태입니다.
+
+```python
+def to_station_record(station):
+    return {
+        "provider": "opinet",
+        "provider_station_id": station.provider_station_id,
+        "provider_product_code": station.provider_product_code,
+        "provider_product_name": station.provider_product_name,
+        "fuel_type": station.fuel_type.value,
+        "brand_code": station.brand_code,
+        "price": station.price,
+        "trade_date": station.trade_date,
+        "trade_time": station.trade_time,
+        "katec_x": station.coordinates.katec.x,
+        "katec_y": station.coordinates.katec.y,
+        "lon": station.coordinates.wgs84.lon,
+        "lat": station.coordinates.wgs84.lat,
+        "raw": dict(station.raw),
+    }
+```
+
+`raw`를 저장할지, 별도 raw table에 둘지, serving table에 normalized 값만 둘지는 애플리케이션 정책으로 결정하세요. pyopinet은 OpiNet domain parsing과 canonical helper만 제공합니다.
+
+| 날짜 | 내용 |
+|---|---|
+| 2026-05-06 (rev4) | 공용 normalized layer 추가. `FuelType`, ProductCode 양방향 mapping, Station product/trade context, coordinate value object, AreaCode helper, read-only raw payload 보존을 문서화. |

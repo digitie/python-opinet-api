@@ -1,0 +1,21 @@
+{
+  "RESULT": {
+    "OIL": [
+      {
+        "UNI_ID": "A9990001",
+        "PRICE": "1600",
+        "PRODCD": "D047",
+        "PRODNM": "provider diesel",
+        "POLL_DIV_CO": "SKE",
+        "OS_NM": "Sample Station",
+        "VAN_ADR": "Sample jibun address",
+        "NEW_ADR": "Sample road address",
+        "GIS_X_COOR": "314871.80000",
+        "GIS_Y_COOR": "544012.00000",
+        "DISTANCE": "100.5",
+        "TRADE_DT": "20250723",
+        "TRADE_TM": "145618"
+      }
+    ]
+  }
+}
