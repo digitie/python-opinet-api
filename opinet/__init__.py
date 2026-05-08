@@ -1,4 +1,4 @@
-"""Unofficial Python client for the Korean Opinet fuel price API."""
+"""한국 오피넷 유가 API의 비공식 Python 클라이언트."""
 
 from .client import OpinetClient
 from .codes import (

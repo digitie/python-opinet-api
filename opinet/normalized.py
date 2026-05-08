@@ -1,4 +1,4 @@
-"""Application-facing normalized records for Opinet response models."""
+"""오피넷 응답 모델의 애플리케이션용 정규화 레코드."""
 
 from __future__ import annotations
 
@@ -29,7 +29,7 @@ def _coerce_tz(tz: str | tzinfo = DEFAULT_TIMEZONE) -> tzinfo:
 
 
 def to_json_safe_raw(value: Any) -> JsonValue:
-    """Convert raw payload values to JSON-safe plain dict/list structures."""
+    """raw payload 값을 JSON으로 안전한 기본 dict/list 구조로 변환한다."""
     if value is None or isinstance(value, bool | int | float | str):
         return value
     if isinstance(value, Enum):
@@ -51,7 +51,7 @@ class _NormalizedModel(BaseModel):
 
 
 class NormalizedFuelAverage(_NormalizedModel):
-    """Normalized national average fuel price record."""
+    """정규화된 전국 평균 유가 레코드."""
 
     provider: Literal["opinet"] = PROVIDER
     provider_endpoint: str
@@ -64,16 +64,16 @@ class NormalizedFuelAverage(_NormalizedModel):
     raw: dict[str, Any]
 
     def price_datetime(self, tz: str | tzinfo = DEFAULT_TIMEZONE) -> datetime:
-        """Return the price date as timezone-aware midnight in the given timezone."""
+        """가격 날짜를 지정 시간대의 시간대 정보가 포함된 자정으로 반환한다."""
         return datetime.combine(self.trade_date, time.min, tzinfo=_coerce_tz(tz))
 
     def price_timestamp(self, tz: str | tzinfo = DEFAULT_TIMEZONE) -> float:
-        """Return ``price_datetime(tz).timestamp()``."""
+        """``price_datetime(tz).timestamp()`` 값을 반환한다."""
         return self.price_datetime(tz).timestamp()
 
 
 class NormalizedFuelStation(_NormalizedModel):
-    """Normalized fuel station price/search record."""
+    """정규화된 주유소 가격/검색 레코드."""
 
     provider: Literal["opinet"] = PROVIDER
     provider_endpoint: str
@@ -98,14 +98,14 @@ class NormalizedFuelStation(_NormalizedModel):
     raw: dict[str, Any]
 
     def trade_datetime(self, tz: str | tzinfo = DEFAULT_TIMEZONE) -> datetime | None:
-        """Return a timezone-aware trade datetime when both date and time are available."""
+        """거래 날짜와 시간이 모두 있으면 시간대 정보가 포함된 datetime을 반환한다."""
         if self.trade_date is None or self.trade_time is None:
             return None
         return datetime.combine(self.trade_date, self.trade_time, tzinfo=_coerce_tz(tz))
 
 
 class NormalizedFuelStationDetailPrice(_NormalizedModel):
-    """Normalized product price row within a station detail record."""
+    """주유소 상세 레코드 안의 정규화된 제품별 가격 row."""
 
     provider: Literal["opinet"] = PROVIDER
     provider_endpoint: str
@@ -119,12 +119,12 @@ class NormalizedFuelStationDetailPrice(_NormalizedModel):
     raw: dict[str, Any]
 
     def trade_datetime(self, tz: str | tzinfo = DEFAULT_TIMEZONE) -> datetime:
-        """Return a timezone-aware trade datetime for this price row."""
+        """이 가격 row의 거래 시각을 시간대 정보가 포함된 datetime으로 반환한다."""
         return datetime.combine(self.trade_date, self.trade_time, tzinfo=_coerce_tz(tz))
 
 
 class NormalizedFuelStationDetail(_NormalizedModel):
-    """Normalized fuel station detail record."""
+    """정규화된 주유소 상세 레코드."""
 
     provider: Literal["opinet"] = PROVIDER
     provider_endpoint: str
@@ -151,7 +151,7 @@ class NormalizedFuelStationDetail(_NormalizedModel):
 
 
 class NormalizedFuelRegionCode(_NormalizedModel):
-    """Normalized Opinet region code record."""
+    """정규화된 오피넷 지역 코드 레코드."""
 
     provider: Literal["opinet"] = PROVIDER
     provider_endpoint: str
@@ -164,7 +164,7 @@ class NormalizedFuelRegionCode(_NormalizedModel):
 
 
 def normalize_average(avg: AvgPrice, *, endpoint: str = "avgAllPrice.do") -> NormalizedFuelAverage:
-    """Build a normalized average-price record from ``AvgPrice``."""
+    """``AvgPrice``에서 정규화 평균가 레코드를 만든다."""
     return NormalizedFuelAverage(
         provider_endpoint=endpoint,
         provider_product_code=avg.provider_product_code,
@@ -178,7 +178,7 @@ def normalize_average(avg: AvgPrice, *, endpoint: str = "avgAllPrice.do") -> Nor
 
 
 def normalize_station(station: Station, *, endpoint: str) -> NormalizedFuelStation:
-    """Build a normalized station record from ``Station``."""
+    """``Station``에서 정규화 주유소 레코드를 만든다."""
     return NormalizedFuelStation(
         provider_endpoint=endpoint,
         provider_station_id=station.provider_station_id,
@@ -208,7 +208,7 @@ def normalize_station_detail(
     *,
     endpoint: str = "detailById.do",
 ) -> NormalizedFuelStationDetail:
-    """Build a normalized station-detail record from ``StationDetail``."""
+    """``StationDetail``에서 정규화 주유소 상세 레코드를 만든다."""
     return NormalizedFuelStationDetail(
         provider_endpoint=endpoint,
         provider_station_id=detail.provider_station_id,
@@ -256,7 +256,7 @@ def _normalize_station_detail_price(
 
 
 def normalize_region_code(area: AreaCode, *, endpoint: str = "areaCode.do") -> NormalizedFuelRegionCode:
-    """Build a normalized region-code record from ``AreaCode``."""
+    """``AreaCode``에서 정규화 지역 코드 레코드를 만든다."""
     return NormalizedFuelRegionCode(
         provider_endpoint=endpoint,
         provider_region_code=area.code,

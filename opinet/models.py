@@ -1,4 +1,4 @@
-"""Dataclasses returned by the Opinet client."""
+"""오피넷 클라이언트가 반환하는 데이터 클래스 모델."""
 
 from __future__ import annotations
 
@@ -75,7 +75,7 @@ def _validated_area_level(code: str) -> Literal["sido", "sigungu"]:
 
 @dataclass(frozen=True, slots=True)
 class KatecPoint:
-    """KATEC coordinate point in ``(x, y)`` meter order."""
+    """미터 단위 ``(x, y)`` 순서의 KATEC 좌표점."""
 
     x: float
     y: float
@@ -85,13 +85,13 @@ class KatecPoint:
         object.__setattr__(self, "y", _finite_float(self.y, "y"))
 
     def as_x_y(self) -> tuple[float, float]:
-        """Return the point as ``(x, y)``."""
+        """좌표를 ``(x, y)`` 튜플로 반환한다."""
         return self.x, self.y
 
 
 @dataclass(frozen=True, slots=True)
 class Wgs84Point:
-    """WGS84 coordinate point in ``(lon, lat)`` order."""
+    """``(lon, lat)`` 순서의 WGS84 좌표점."""
 
     lon: float
     lat: float
@@ -101,13 +101,13 @@ class Wgs84Point:
         object.__setattr__(self, "lat", _finite_float(self.lat, "lat"))
 
     def as_lon_lat(self) -> tuple[float, float]:
-        """Return the point as ``(lon, lat)``."""
+        """좌표를 ``(lon, lat)`` 튜플로 반환한다."""
         return self.lon, self.lat
 
 
 @dataclass(frozen=True, slots=True)
 class StationCoordinates:
-    """Reusable station coordinates with KATEC and WGS84 values."""
+    """KATEC과 WGS84 값을 함께 담는 재사용 주유소 좌표."""
 
     katec: KatecPoint
     wgs84: Wgs84Point
@@ -158,15 +158,15 @@ class AvgPrice:
         return product_code_to_fuel_type(self.product_code)
 
     def price_datetime(self, tz: str | tzinfo = "Asia/Seoul") -> datetime:
-        """Return the average price date as timezone-aware midnight."""
+        """평균가 날짜를 시간대 정보가 포함된 자정 datetime으로 반환한다."""
         return self.to_normalized().price_datetime(tz)
 
     def price_timestamp(self, tz: str | tzinfo = "Asia/Seoul") -> float:
-        """Return ``price_datetime(tz).timestamp()``."""
+        """``price_datetime(tz).timestamp()`` 값을 반환한다."""
         return self.to_normalized().price_timestamp(tz)
 
     def to_normalized(self, *, endpoint: str = "avgAllPrice.do") -> NormalizedFuelAverage:
-        """Return an application-facing normalized average-price record."""
+        """애플리케이션용 정규화 평균가 레코드를 반환한다."""
         from .normalized import normalize_average
 
         return normalize_average(self, endpoint=endpoint)
@@ -234,11 +234,11 @@ class Station:
         return StationCoordinates.from_values(self.katec_x, self.katec_y, self.lon, self.lat)
 
     def trade_datetime(self, tz: str | tzinfo = "Asia/Seoul") -> datetime | None:
-        """Return timezone-aware trade datetime when date and time are present."""
+        """거래 날짜와 시간이 모두 있으면 시간대 정보가 포함된 datetime을 반환한다."""
         return self.to_normalized(endpoint="unknown").trade_datetime(tz)
 
     def to_normalized(self, *, endpoint: str) -> NormalizedFuelStation:
-        """Return an application-facing normalized station record."""
+        """애플리케이션용 정규화 주유소 레코드를 반환한다."""
         from .normalized import normalize_station
 
         return normalize_station(self, endpoint=endpoint)
@@ -310,7 +310,7 @@ class StationDetail:
         return StationCoordinates.from_values(self.katec_x, self.katec_y, self.lon, self.lat)
 
     def to_normalized(self, *, endpoint: str = "detailById.do") -> NormalizedFuelStationDetail:
-        """Return an application-facing normalized station-detail record."""
+        """애플리케이션용 정규화 주유소 상세 레코드를 반환한다."""
         from .normalized import normalize_station_detail
 
         return normalize_station_detail(self, endpoint=endpoint)
@@ -349,7 +349,7 @@ class AreaCode:
         return opinet_sido_to_bjd(sido_code)
 
     def to_normalized(self, *, endpoint: str = "areaCode.do") -> NormalizedFuelRegionCode:
-        """Return an application-facing normalized region-code record."""
+        """애플리케이션용 정규화 지역 코드 레코드를 반환한다."""
         from .normalized import normalize_region_code
 
         return normalize_region_code(self, endpoint=endpoint)

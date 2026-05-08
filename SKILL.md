@@ -17,6 +17,13 @@ You are helping build/maintain a Python client for the Korean **Opinet** free fu
 6. **No XML parsing in user-facing methods**.
 7. **All response fields are converted to Python native types** before the model is returned to the user. The API itself returns everything as strings. See "Type conversion policy" below.
 
+## Documentation style invariants
+
+1. 문서에서 파일 위치를 언급할 때는 프로젝트 루트 기준 상대 경로만 사용한다. 예: `opinet/client.py`, `tests/fixtures/avg_all_price.json`.
+2. 로컬 절대 경로는 저장소 문서에 남기지 않는다.
+3. Python 내부 문서(모듈, 클래스, 함수, 메서드 docstring과 유지보수용 주석)는 한글로 작성한다.
+4. API 필드명, 엔드포인트명, enum 값, 외부 오류 메시지처럼 원문 자체가 의미 있는 값은 그대로 둔다.
+
 ## Five official endpoints (start here)
 
 These are the only endpoints with a public spec page on the Opinet site:
@@ -324,20 +331,21 @@ Each experimental method's docstring must start with:
 
 ```
 .. warning::
-   This endpoint is from the PDF guidebook and is NOT documented on
-   the official Opinet open API page. Path, parameter names, and
-   response shape are unverified. Last verified: <DATE> by <CONTRIBUTOR>.
+   이 엔드포인트는 PDF 가이드북에만 있고 공식 오피넷 open API
+   페이지에는 문서화되어 있지 않습니다. 경로, 파라미터 이름,
+   응답 구조는 검증되지 않았습니다. Last verified: <DATE> by <CONTRIBUTOR>.
 ```
 
 ## Docstring rules (every public method)
 
-1. One-line summary in Korean (consistent with the user's language).
+1. 모든 Python docstring은 한글로 작성한다. public 메서드는 1줄 요약으로 시작한다.
 2. **Args**: type, meaning, allowed values/ranges, default.
 3. **Returns**: model class, "empty list when no result" if applicable. **State explicitly that all fields are Python native types** (date/time/float/bool/enum) — not strings.
 4. **Raises**: list every exception that can actually be thrown — `OpinetAuthError`, `OpinetRateLimitError`, `OpinetInvalidParameterError`, `OpinetNetworkError`, `OpinetServerError`. Skip ones impossible for that method.
 5. **Example** with `# doctest: +SKIP` for any network call.
 6. The exact endpoint name (e.g. `avgAllPrice.do`) and apiId in the body of the docstring.
 7. Units: prices = 원, distance = m, KATEC = m, WGS84 = degrees.
+8. 모듈, 클래스, private helper, 테스트 helper의 docstring도 한글로 유지한다.
 
 ## Models
 

@@ -52,6 +52,12 @@
 - 미검증 API: `opinet/experimental/`
 - 테스트 fixture: `tests/fixtures/`
 
+## 문서 작성 규칙
+- 문서에서 파일 위치를 언급할 때는 프로젝트 루트 기준 상대 경로만 쓴다. 예: `opinet/client.py`, `docs/implementation-status.md`.
+- 로컬 절대 경로는 실행 로그나 임시 설명에만 쓰고 저장소 문서에는 남기지 않는다.
+- Python 내부 문서(모듈, 클래스, 함수, 메서드 docstring과 유지보수용 주석)는 한글로 작성한다.
+- API 필드명, 엔드포인트, enum 값, 외부 오류 메시지처럼 원문 자체가 의미 있는 값은 그대로 둔다.
+
 ## 작업 원칙
 - 구현 작업 전에는 `opinet-api.md`의 관련 엔드포인트 섹션과 `SKILL.md`의 불변 조건을 먼저 확인한다.
 - 변경은 가능한 한 작은 완성 단위로 만들고, 공개 API 이름과 타입 안정성을 우선한다.

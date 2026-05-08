@@ -1,29 +1,29 @@
-"""Exception hierarchy for the Opinet client."""
+"""오피넷 클라이언트 예외 계층."""
 
 
 class OpinetError(Exception):
-    """Base class for all Opinet client errors."""
+    """모든 오피넷 클라이언트 오류의 공통 기본 클래스."""
 
 
 class OpinetAuthError(OpinetError):
-    """Authentication failed or the API key is invalid."""
+    """인증 실패 또는 API 키 오류."""
 
 
 class OpinetRateLimitError(OpinetError):
-    """The API quota or rate limit was exceeded."""
+    """API 호출 한도 또는 호출 제한 초과."""
 
 
 class OpinetInvalidParameterError(OpinetError):
-    """A client-side parameter validation error occurred before the HTTP call."""
+    """HTTP 호출 전 클라이언트 파라미터 검증 실패."""
 
 
 class OpinetNoDataError(OpinetError):
-    """The API returned no data when strict empty handling is enabled."""
+    """엄격한 빈 결과 처리에서 API가 빈 결과를 반환했을 때의 오류."""
 
 
 class OpinetServerError(OpinetError):
-    """The API returned an unexpected response or parsing failed."""
+    """API 응답이 예기치 않거나 파싱에 실패했을 때의 오류."""
 
 
 class OpinetNetworkError(OpinetError):
-    """A network-level error occurred while calling Opinet."""
+    """오피넷 호출 중 발생한 네트워크 레벨 오류."""

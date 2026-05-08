@@ -1,4 +1,4 @@
-"""Shared pytest helpers for Opinet tests."""
+"""오피넷 테스트 공용 pytest 헬퍼."""
 
 from __future__ import annotations
 
@@ -16,7 +16,7 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
 
 def _load_local_env() -> None:
-    """Load local ignored .env values without adding a runtime dependency."""
+    """런타임 의존성을 추가하지 않고 ignore된 로컬 .env 값을 읽는다."""
     env_path = PROJECT_ROOT / ".env"
     if not env_path.exists():
         return

@@ -24,6 +24,8 @@ PDF 가이드북의 추가 API는 아직 공식 명세 페이지가 없으므로
 - API 응답은 모델 생성 전에 `date`, `time`, `float`, `bool`, `StrEnum`으로 변환합니다.
 - `AREA_CD`, `SIGUNCD`, `UNI_ID`, 제품 코드, 상표 코드는 정수로 변환하지 않습니다.
 - KATEC 변환은 `opinet/coords.py`의 `pyproj` transformer만 사용합니다.
+- 문서에서 파일 위치는 프로젝트 루트 기준 상대 경로로 표기합니다.
+- Python 내부 문서(docstring과 유지보수용 주석)는 한글로 작성합니다. 외부 API 고유 명칭과 코드 식별자는 원문을 유지합니다.
 
 ## 테스트 매트릭스
 

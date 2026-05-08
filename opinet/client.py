@@ -1,4 +1,4 @@
-"""High-level client for the five official Opinet API endpoints."""
+"""오피넷 공식 5개 API 엔드포인트용 고수준 클라이언트."""
 
 from __future__ import annotations
 
@@ -110,7 +110,7 @@ def _parse_error(endpoint: str, exc: Exception) -> OpinetServerError:
 
 
 class OpinetClient:
-    """Client entrypoint for the five official Opinet API endpoints."""
+    """오피넷 공식 5개 API 엔드포인트 진입점."""
 
     def __init__(
         self,

@@ -1,4 +1,4 @@
-"""HTTP helper for the Opinet API."""
+"""오피넷 API용 HTTP 헬퍼."""
 
 from __future__ import annotations
 

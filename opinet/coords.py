@@ -1,4 +1,4 @@
-"""KATEC <-> WGS84 coordinate conversion for Opinet station data."""
+"""오피넷 주유소 데이터의 KATEC ↔ WGS84 좌표 변환."""
 
 from __future__ import annotations
 
@@ -24,14 +24,14 @@ def _ensure_finite(*values: float) -> None:
 
 
 def wgs84_to_katec(lon: float, lat: float) -> tuple[float, float]:
-    """Convert WGS84 longitude/latitude to KATEC x/y in meters."""
+    """WGS84 경도/위도를 미터 단위 KATEC x/y로 변환한다."""
     _ensure_finite(lon, lat)
     x, y = _WGS84_TO_KATEC.transform(lon, lat)
     return float(x), float(y)
 
 
 def katec_to_wgs84(x: float, y: float) -> tuple[float, float]:
-    """Convert KATEC x/y in meters to WGS84 longitude/latitude."""
+    """미터 단위 KATEC x/y를 WGS84 경도/위도로 변환한다."""
     _ensure_finite(x, y)
     lon, lat = _KATEC_TO_WGS84.transform(x, y)
     return float(lon), float(lat)
