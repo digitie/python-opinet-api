@@ -58,6 +58,11 @@
 - Python 내부 문서(모듈, 클래스, 함수, 메서드 docstring과 유지보수용 주석)는 한글로 작성한다.
 - API 필드명, 엔드포인트, enum 값, 외부 오류 메시지처럼 원문 자체가 의미 있는 값은 그대로 둔다.
 
+## 로컬 도구/인코딩 규칙
+- 이 환경에서 `rg` 실행이 `Access is denied`로 실패할 수 있다. 같은 실패를 반복하지 말고 `git ls-files`, `Get-ChildItem -Recurse -File`, `Select-String`으로 우회한다.
+- 한글 문서나 소스 파일을 PowerShell에서 읽을 때는 기본 출력 인코딩을 믿지 말고 `Get-Content -Encoding utf8` 또는 `Get-Content -Raw -Encoding utf8`을 사용한다.
+- 깨진 한글 출력이 보이면 파일 내용이 깨졌다고 판단하지 말고 먼저 UTF-8 인코딩을 명시해서 다시 확인한다.
+
 ## 작업 원칙
 - 구현 작업 전에는 `opinet-api.md`의 관련 엔드포인트 섹션과 `SKILL.md`의 불변 조건을 먼저 확인한다.
 - 변경은 가능한 한 작은 완성 단위로 만들고, 공개 API 이름과 타입 안정성을 우선한다.

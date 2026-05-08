@@ -870,6 +870,8 @@ class OpinetNetworkError(OpinetError):
 - 로컬 절대 경로는 저장소 문서에 남기지 않습니다.
 - Python 내부 문서(docstring과 유지보수용 주석)는 한글로 작성합니다.
 - API 필드명, 엔드포인트, enum 값처럼 원문 자체가 의미 있는 값은 그대로 둡니다.
+- Windows/PowerShell 환경에서 `rg`가 실행 권한 문제로 실패하면 반복 시도하지 말고 `git ls-files`, `Get-ChildItem -Recurse -File`, `Select-String`으로 우회합니다.
+- 한글 문서/소스 파일은 `Get-Content -Encoding utf8` 또는 `Get-Content -Raw -Encoding utf8`로 확인합니다. PowerShell 기본 출력에서 한글이 깨져 보이면 UTF-8로 다시 읽습니다.
 
 ### 7.1 패키지 구조
 
@@ -1540,6 +1542,7 @@ def test_invalid_input():
 
 | 일자 | 변경 |
 |---|---|
+| 2026-05-09 (rev4) | Windows/PowerShell 환경에서 `rg` 실패 시 우회 명령을 사용하고, 한글 파일은 UTF-8 인코딩을 명시해 읽는 규칙 추가. |
 | 2026-05-09 (rev3) | 문서의 파일 위치는 프로젝트 기준 상대 경로로 쓰고, Python 내부 문서는 한글로 작성한다는 규칙 추가. |
 | 2026-04-30 (rev2) | Python 타입 변환 정책 명시. 시도코드 ↔ 법정동코드 매핑 추가. 응답 필드 표에 Python 타입 컬럼 추가. |
 | 2026-04-30 (rev1) | 초기 작성. 공식 사이트 기준 5개 API 검증. 시도코드/필드 의미 정정. |

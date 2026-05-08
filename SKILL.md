@@ -24,6 +24,12 @@ You are helping build/maintain a Python client for the Korean **Opinet** free fu
 3. Python 내부 문서(모듈, 클래스, 함수, 메서드 docstring과 유지보수용 주석)는 한글로 작성한다.
 4. API 필드명, 엔드포인트명, enum 값, 외부 오류 메시지처럼 원문 자체가 의미 있는 값은 그대로 둔다.
 
+## Local tooling invariants
+
+1. 이 Windows/PowerShell 환경에서는 `rg`가 실행 권한 문제로 실패할 수 있다. 실패하면 반복 시도하지 말고 `git ls-files`, `Get-ChildItem -Recurse -File`, `Select-String`을 사용한다.
+2. 한글 Markdown/Python 파일을 PowerShell에서 읽을 때는 `Get-Content -Encoding utf8` 또는 `Get-Content -Raw -Encoding utf8`을 사용한다.
+3. PowerShell 기본 출력에서 한글이 깨져 보이면 파일 손상으로 간주하지 말고 UTF-8 인코딩을 명시해서 재확인한다.
+
 ## Five official endpoints (start here)
 
 These are the only endpoints with a public spec page on the Opinet site:

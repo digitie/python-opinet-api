@@ -26,6 +26,8 @@ PDF 가이드북의 추가 API는 아직 공식 명세 페이지가 없으므로
 - KATEC 변환은 `opinet/coords.py`의 `pyproj` transformer만 사용합니다.
 - 문서에서 파일 위치는 프로젝트 루트 기준 상대 경로로 표기합니다.
 - Python 내부 문서(docstring과 유지보수용 주석)는 한글로 작성합니다. 외부 API 고유 명칭과 코드 식별자는 원문을 유지합니다.
+- 이 Windows/PowerShell 환경에서는 `rg`가 실행 권한 문제로 실패할 수 있으므로, 실패 시 `git ls-files`, `Get-ChildItem -Recurse -File`, `Select-String`으로 파일 목록과 검색을 수행합니다.
+- 한글 문서/소스 파일 확인 시 `Get-Content -Encoding utf8` 또는 `Get-Content -Raw -Encoding utf8`을 사용해 깨진 출력으로 인한 오판을 피합니다.
 
 ## 테스트 매트릭스
 
