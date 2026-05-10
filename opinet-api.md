@@ -186,6 +186,7 @@ def strip_or_none(s: Any) -> str | None:
 | `GSC` | GS칼텍스 |
 | `HDO` | 현대오일뱅크 |
 | `SOL` | S-OIL |
+| `RTO` | 알뜰 계열 (실서버 응답 확인) |
 | `RTE` | 자영알뜰 |
 | `RTX` | 고속도로알뜰 |
 | `NHO` | 농협알뜰 |
@@ -212,7 +213,7 @@ def strip_or_none(s: Any) -> str | None:
 
 > ⚠️ 흔한 오해 두 가지:
 > 1. `LPG_YN`은 "LPG 취급 여부"가 **아닙니다** — 업종 자체를 가리킵니다.
-> 2. `KPETRO_YN`은 "알뜰주유소 여부"가 **아닙니다** — 한국석유관리원 품질인증주유소 여부입니다. 알뜰 여부는 `POLL_DIV_CO ∈ {RTE, RTX, NHO}`로 판정하세요.
+> 2. `KPETRO_YN`은 "알뜰주유소 여부"가 **아닙니다** — 한국석유관리원 품질인증주유소 여부입니다. 알뜰 여부는 `POLL_DIV_CO ∈ {RTO, RTE, RTX, NHO}`로 판정하세요.
 
 ### 2.7 시도코드 ↔ 법정동코드 매칭 ⭐
 
@@ -862,6 +863,7 @@ class OpinetNetworkError(OpinetError):
 
 - 좌표, 장소 DTO, POI 정규화처럼 다른 TripMate 라이브러리에 이미 구현된 기능은 `opinet` 안에 복제하지 않고 해당 라이브러리를 직접 의존합니다.
 - KATEC/WGS84 경계는 `pykrtour.PlaceCoordinate`와 `pykrtour.KatecPoint`를 파라미터와 리턴 모델에 그대로 노출합니다. 단순 wrapper, compatibility alias, mirror dataclass는 만들지 않습니다.
+- 오피넷 4자리 시군구 코드를 법정동 시군구 코드로 해석해야 하면 코드 자체를 변환하지 않고 `pyvworld.VworldClient.search_district(..., category="L2")` 결과의 5자리 `id`를 명시 매칭합니다.
 - 이 원칙은 "최소 수정"보다 우선합니다. 직접 의존으로 공개 API가 바뀌면 README, 테스트, 타입 힌트를 함께 갱신해 새 계약을 명확히 합니다.
 - `SIGUNCD`는 오피넷 자체 4자리 시군구 코드입니다. 법정동 5자리 시군구 코드나 10자리 법정동코드와 일치한다고 추정하지 않습니다.
 
@@ -878,6 +880,7 @@ opinet/
 │   ├── codes.py             # ProductCode, BrandCode, SortOrder, StationType (StrEnum)
 │   │                        # + 시도코드 ↔ 법정동코드 매핑
 │   ├── models.py            # frozen slots dataclasses (Python 네이티브 타입)
+│   ├── vworld.py            # pyvworld district 검색으로 시군구 법정동코드 명시 매핑
 │   └── experimental/        # PDF 가이드북 17종 (검증되지 않음)
 │       ├── __init__.py
 │       └── client.py
@@ -917,6 +920,7 @@ class BrandCode(StrEnum):
     GSC = "GSC"  # GS칼텍스
     HDO = "HDO"  # 현대오일뱅크
     SOL = "SOL"  # S-OIL
+    RTO = "RTO"  # 알뜰 계열(실서버 응답 확인)
     RTE = "RTE"  # 자영알뜰
     RTX = "RTX"  # 고속도로알뜰
     NHO = "NHO"  # 농협알뜰
@@ -934,7 +938,7 @@ class StationType(StrEnum):
     LPG_STATION = "Y"   # 자동차충전소
     BOTH = "C"          # 주유소/충전소 겸업
 
-ALDDLE_BRANDS = frozenset({BrandCode.RTE, BrandCode.RTX, BrandCode.NHO})
+ALDDLE_BRANDS = frozenset({BrandCode.RTO, BrandCode.RTE, BrandCode.RTX, BrandCode.NHO})
 
 def is_alddle(brand: str | BrandCode | None) -> bool:
     """알뜰주유소 여부. KPETRO_YN과는 무관."""

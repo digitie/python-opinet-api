@@ -68,7 +68,7 @@ def test_unknown_bjd_code(code):
         bjd_sido_to_opinet(code)
 
 
-@pytest.mark.parametrize("brand", [BrandCode.RTE, BrandCode.RTX, BrandCode.NHO, "RTE"])
+@pytest.mark.parametrize("brand", [BrandCode.RTO, BrandCode.RTE, BrandCode.RTX, BrandCode.NHO, "RTE"])
 def test_is_alddle_true(brand):
     assert is_alddle(brand) is True
 

@@ -34,8 +34,9 @@ You are helping build/maintain a Python client for the Korean **Opinet** free fu
 
 1. 공통 타입, 좌표 변환, POI 정규화처럼 다른 TripMate 라이브러리에 이미 구현된 기능은 `opinet` 안에 다시 만들지 말고 해당 라이브러리를 직접 의존한다.
 2. `pykrtour`가 제공하는 `PlaceCoordinate`, `KatecPoint` 같은 값 객체는 파라미터와 리턴 모델에서 그대로 사용한다. 단순 wrapper, compatibility alias, mirror dataclass, proxy method를 새로 만들지 않는다.
-3. 이 원칙은 "최소 수정"보다 우선한다. 직접 의존으로 공개 API 변경이 필요하면 README, `opinet-api.md`, tests를 함께 바꿔 새 경계를 명확히 한다.
-4. `SIGUNCD`는 오피넷 자체 4자리 시군구 코드다. 법정동 5자리 시군구 코드나 10자리 법정동코드와 같다고 추정하거나 `pykrtour` 법정동 DTO로 강제 변환하지 않는다.
+3. 오피넷 4자리 시군구 코드를 법정동 시군구 코드로 해석해야 하면 `pyvworld.VworldClient.search_district(..., category="L2")` 결과의 5자리 `id`를 명시 매칭한다. 코드를 산술 변환하지 않는다.
+4. 이 원칙은 "최소 수정"보다 우선한다. 직접 의존으로 공개 API 변경이 필요하면 README, `opinet-api.md`, tests를 함께 바꿔 새 경계를 명확히 한다.
+5. `SIGUNCD`는 오피넷 자체 4자리 시군구 코드다. 법정동 5자리 시군구 코드나 10자리 법정동코드와 같다고 추정하거나 `pykrtour` 법정동 DTO로 강제 변환하지 않는다.
 
 ## Five official endpoints (start here)
 

@@ -16,6 +16,9 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+vworld = [
+    "pyvworld>=0.1.0",
+]
 dev = [
     "build",
     "pytest>=7.0",

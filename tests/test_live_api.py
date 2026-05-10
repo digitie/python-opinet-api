@@ -1,12 +1,18 @@
 from datetime import date
+from pathlib import Path
+import sys
+import time
 
 import pytest
 from pykrtour import PlaceCoordinate
 
 from opinet import AreaCode, AvgPrice, ProductCode, Station, StationDetail
+from opinet.vworld import resolve_sigungu_bjd_code
 
 
 pytestmark = pytest.mark.live
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+PYVWORLD_ROOT = PROJECT_ROOT.parent / "pyvworld"
 
 
 def _skip_if_empty(rows: list[object], endpoint: str) -> None:
@@ -17,6 +23,37 @@ def _skip_if_empty(rows: list[object], endpoint: str) -> None:
         )
 
 
+def _retry_live_call(call):
+    last_error: Exception | None = None
+    retry_names = {"VworldAuthError", "VworldNetworkError", "VworldServerError"}
+    for attempt in range(5):
+        try:
+            return call()
+        except Exception as exc:
+            if exc.__class__.__name__ not in retry_names:
+                raise
+            last_error = exc
+            if attempt < 4:
+                time.sleep(0.5)
+    assert last_error is not None
+    raise last_error
+
+
+@pytest.fixture(scope="session")
+def live_vworld_client():
+    """같은 workspace의 pyvworld와 VWORLD_API_KEY로 VWorld live client를 만든다."""
+    if PYVWORLD_ROOT.exists():
+        sys.path.insert(0, str(PYVWORLD_ROOT))
+    try:
+        from pyvworld import VworldClient
+    except ImportError:
+        pytest.skip("pyvworld is required for VWorld live integration tests")
+    client = VworldClient.from_env(domain="", timeout=20, max_retries=1, retry_backoff=0)
+    if not client.api_key:
+        pytest.skip("VWORLD_API_KEY is required for VWorld live integration tests")
+    return client
+
+
 def test_live_area_code_endpoint_is_reachable(live_client):
     """라이브 서버는 문서화된 RESULT/OIL JSON 감싼 구조를 반환해야 한다."""
     data = live_client._require_http().get("areaCode.do")
@@ -25,6 +62,25 @@ def test_live_area_code_endpoint_is_reachable(live_client):
     assert isinstance(data.get("RESULT"), dict)
     assert "OIL" in data["RESULT"]
     assert isinstance(data["RESULT"]["OIL"], list)
+
+
+def test_live_resolve_opinet_sigungu_code_with_vworld(live_client, live_vworld_client):
+    """오피넷 시군구 코드는 VWorld district 검색으로 법정동 시군구 코드에 매핑된다."""
+    areas = live_client.get_area_codes()
+    _skip_if_empty(areas, "areaCode.do")
+
+    mapping = _retry_live_call(
+        lambda: resolve_sigungu_bjd_code(
+            "0113",
+            opinet_client=live_client,
+            vworld_client=live_vworld_client,
+        )
+    )
+
+    assert mapping.opinet_sigungu_code == "0113"
+    assert mapping.opinet_sigungu_name == "강남구"
+    assert mapping.bjd_sigungu_code == "11680"
+    assert mapping.vworld_title == "서울특별시 강남구"
 
 
 def test_live_official_endpoints_parse_when_key_returns_data(live_client):

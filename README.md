@@ -163,6 +163,7 @@ BrandCode.SKE   # SK에너지
 BrandCode.GSC   # GS칼텍스
 BrandCode.HDO   # 현대오일뱅크
 BrandCode.SOL   # S-OIL
+BrandCode.RTO   # 알뜰 계열(실서버 응답 확인)
 BrandCode.RTE   # 자영알뜰
 BrandCode.RTX   # 고속도로알뜰
 BrandCode.NHO   # 농협알뜰
@@ -174,7 +175,7 @@ StationType.GAS_STATION  # "N" 주유소
 StationType.LPG_STATION  # "Y" 자동차충전소
 StationType.BOTH         # "C" 겸업
 
-is_alddle(BrandCode.RTE)  # True (RTE/RTX/NHO이면 알뜰)
+is_alddle(BrandCode.RTE)  # True (RTO/RTE/RTX/NHO이면 알뜰)
 is_alddle(BrandCode.SKE)  # False
 ```
 
@@ -352,7 +353,7 @@ except (OpinetServerError, OpinetNetworkError) as e:
 ```python
 from opinet.codes import is_alddle
 
-is_alddle(detail.brand)  # brand가 RTE/RTX/NHO이면 True
+is_alddle(detail.brand)  # brand가 RTO/RTE/RTX/NHO이면 True
 detail.is_kpetro          # KPETRO_YN을 매핑한 별도 boolean (품질인증 여부)
 ```
 
@@ -442,6 +443,9 @@ skill 파일은 다음을 정의합니다:
 - `requests` ≥ 2.28
 - `pydantic` ≥ 2.0
 - `pykrtour[geo]` ≥ 0.1.0
+
+**선택 기능:**
+- `pyvworld` ≥ 0.1.0 (`pip install opinet[vworld]`, VWorld로 시군구 법정동코드 매핑을 할 때)
 
 **개발:**
 - `pytest` ≥ 7.0
@@ -646,7 +650,7 @@ katec.as_x_y()          # (x, y)
 
 ### AreaCode helper
 
-`AreaCode`는 OpiNet code level과 BJD 시도 prefix를 명시적으로 제공합니다. 시도는 2자리, 시군구는 4자리입니다. 시군구 4자리 OpiNet code를 법정동 10자리 code로 자동 변환할 수는 없으며, pyopinet은 그런 변환을 추정하지 않습니다.
+`AreaCode`는 OpiNet code level과 BJD 시도 prefix를 명시적으로 제공합니다. 시도는 2자리, 시군구는 4자리입니다. 시군구 4자리 OpiNet code 자체는 법정동코드와 일치하지 않으므로 pyopinet은 산술 변환을 추정하지 않습니다.
 
 ```python
 area = client.get_area_codes("01")[0]
@@ -657,6 +661,26 @@ area.bjd_sido_prefix   # "11"
 ```
 
 잘못된 길이의 code나 미확인 OpiNet 시도 code는 `OpinetInvalidParameterError`로 실패합니다.
+
+VWorld 행정구역 검색을 함께 쓰면 오피넷 시군구 코드를 5자리 법정동 시군구 코드로 명시 매핑할 수 있습니다.
+
+```python
+from pyvworld import VworldClient
+from opinet.vworld import resolve_sigungu_bjd_code
+
+vworld = VworldClient.from_env(domain="")
+mapping = resolve_sigungu_bjd_code(
+    "0113",
+    opinet_client=client,
+    vworld_client=vworld,
+)
+
+mapping.opinet_sigungu_name  # "강남구"
+mapping.bjd_sigungu_code     # "11680"
+mapping.vworld_title         # "서울특별시 강남구"
+```
+
+동일한 동작은 `client.resolve_sigungu_bjd_code("0113", vworld_client=vworld)`로도 호출할 수 있습니다.
 
 ### raw payload 보존
 

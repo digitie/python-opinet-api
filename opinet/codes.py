@@ -38,6 +38,7 @@ class BrandCode(StrEnum):
     GSC = "GSC"
     HDO = "HDO"
     SOL = "SOL"
+    RTO = "RTO"
     RTE = "RTE"
     RTX = "RTX"
     NHO = "NHO"
@@ -61,7 +62,7 @@ class StationType(StrEnum):
     BOTH = "C"
 
 
-ALDDLE_BRANDS = frozenset({BrandCode.RTE, BrandCode.RTX, BrandCode.NHO})
+ALDDLE_BRANDS = frozenset({BrandCode.RTO, BrandCode.RTE, BrandCode.RTX, BrandCode.NHO})
 
 PRODUCT_CODE_TO_FUEL_TYPE: dict[ProductCode, FuelType] = {
     ProductCode.GASOLINE: FuelType.GASOLINE,

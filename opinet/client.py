@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import os
 from datetime import date, time
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from pykrtour import KatecPoint, PlaceCoordinate
 
@@ -13,6 +13,9 @@ from ._http import _OpinetHttp
 from .codes import BrandCode, ProductCode, SortOrder, StationType, opinet_sido_to_bjd
 from .exceptions import OpinetAuthError, OpinetInvalidParameterError, OpinetNoDataError, OpinetServerError
 from .models import AreaCode, AvgPrice, OilPrice, Station, StationDetail
+
+if TYPE_CHECKING:
+    from .vworld import OpinetSigunguBjdMapping
 
 
 def _normalize_oil(data: dict[str, Any], endpoint: str) -> list[dict[str, Any]]:
@@ -273,6 +276,22 @@ class OpinetClient:
                 raise OpinetServerError(f"{endpoint}: AREA_CD and AREA_NM are required")
             parsed.append(AreaCode(code=code, name=name, raw=row))
         return parsed
+
+    def resolve_sigungu_bjd_code(
+        self,
+        sigungu_code: str,
+        *,
+        vworld_client: Any,
+    ) -> OpinetSigunguBjdMapping:
+        """pyvworld 행정구역 검색으로 오피넷 시군구 코드를 법정동 코드로 해석한다."""
+
+        from .vworld import resolve_sigungu_bjd_code
+
+        return resolve_sigungu_bjd_code(
+            sigungu_code,
+            opinet_client=self,
+            vworld_client=vworld_client,
+        )
 
     def _build_station(
         self,

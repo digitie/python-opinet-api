@@ -33,7 +33,8 @@
 - 좌표 변환은 `pykrtour.PlaceCoordinate`와 `pykrtour.KatecPoint`를 직접 사용한다. `opinet` 내부에 별도 wrapper, proxy dataclass, 호환 adapter를 만들지 않는다.
 - `LPG_YN`은 LPG 판매 여부가 아니라 업종 구분이며 `StationType`으로 매핑한다.
 - `KPETRO_YN`은 알뜰주유소 여부가 아니라 품질인증 여부이며 `is_kpetro`로 매핑한다.
-- 알뜰주유소 여부는 상표 코드 `RTE`, `RTX`, `NHO`로 판정한다.
+- 알뜰주유소 여부는 상표 코드 `RTO`, `RTE`, `RTX`, `NHO`로 판정한다.
+- `SIGUNCD`를 법정동 시군구 코드로 매핑해야 하면 `pyvworld` district 검색(`category="L2"`) 결과를 명시 매칭한다. 코드값 자체를 산술 변환하지 않는다.
 - 인증키, 실제 API 키, 원본 비밀값은 코드, fixture, 로그, 문서에 남기지 않는다.
 - 로컬 live 테스트 키는 `.env` 또는 환경변수에만 둔다. `.env.example` 외의 `.env*` 파일은 커밋하지 않는다.
 

@@ -25,7 +25,7 @@ PDF 가이드북의 추가 API는 아직 공식 명세 페이지가 없으므로
 - `AREA_CD`, `SIGUNCD`, `UNI_ID`, 제품 코드, 상표 코드는 정수로 변환하지 않습니다.
 - KATEC 변환은 `pykrtour.PlaceCoordinate`와 `pykrtour.KatecPoint`를 직접 사용합니다.
 - 공통 기능이 `pykrtour` 같은 다른 TripMate 라이브러리에 구현돼 있으면 최소 수정보다 직접 의존을 우선합니다. 얇은 wrapper나 mirror dataclass는 만들지 않습니다.
-- `SIGUNCD`는 오피넷 자체 4자리 시군구 코드이며 법정동 시군구 코드나 10자리 법정동코드로 추정 변환하지 않습니다.
+- `SIGUNCD`는 오피넷 자체 4자리 시군구 코드이며 법정동 시군구 코드나 10자리 법정동코드로 추정 변환하지 않습니다. 필요하면 `opinet/vworld.py`에서 `pyvworld` district 검색 결과의 5자리 `id`를 명시 매칭합니다.
 - 문서에서 파일 위치는 프로젝트 루트 기준 상대 경로로 표기합니다.
 - Python 내부 문서(docstring과 유지보수용 주석)는 한글로 작성합니다. 외부 API 고유 명칭과 코드 식별자는 원문을 유지합니다.
 - 이 Windows/PowerShell 환경에서는 `rg`가 실행 권한 문제로 실패할 수 있으므로, 실패 시 `git ls-files`, `Get-ChildItem -Recurse -File`, `Select-String`으로 파일 목록과 검색을 수행합니다.
@@ -38,7 +38,7 @@ PDF 가이드북의 추가 API는 아직 공식 명세 페이지가 없으므로
 | Area | Files | Coverage Intent |
 |---|---|---|
 | Type conversion | `tests/test_convert.py` | 날짜/시간/숫자/불리언/공백 처리 |
-| Code mappings | `tests/test_codes.py` | Opinet ↔ BJD 시도 매핑, 알뜰 상표 판정 |
+| Code mappings | `tests/test_codes.py`, `tests/test_vworld_sigungu.py` | Opinet ↔ BJD 시도 매핑, 알뜰 상표 판정, pyvworld 시군구 매핑 |
 | Coordinates | `pykrtour` 테스트, `tests/test_client_endpoints.py` | WGS84↔KATEC 변환은 `pykrtour`, 오피넷 요청/응답 경계는 클라이언트 테스트 |
 | HTTP errors | `tests/test_http.py` | 인증/쿼터/5xx/네트워크/JSON 오류 |
 | Endpoints | `tests/test_client_endpoints.py` | 공식 5개 API의 타입, 파라미터, 빈 결과, 단일 dict 응답 |
