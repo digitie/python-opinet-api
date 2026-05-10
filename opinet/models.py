@@ -5,10 +5,11 @@ from __future__ import annotations
 from collections.abc import Mapping as MappingABC
 from dataclasses import dataclass, field
 from datetime import date, datetime, time, tzinfo
-from math import isfinite
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Any, Literal, Mapping
 from zoneinfo import ZoneInfo
+
+from pykrtour import KatecPoint, PlaceCoordinate
 
 from .codes import BrandCode, FuelType, ProductCode, StationType, opinet_sido_to_bjd, product_code_to_fuel_type
 from .exceptions import OpinetInvalidParameterError
@@ -63,13 +64,6 @@ def _raw_text(raw: Mapping[str, Any], key: str) -> str | None:
     return text or None
 
 
-def _finite_float(value: float, field_name: str) -> float:
-    result = float(value)
-    if not isfinite(result):
-        raise ValueError(f"{field_name} must be finite")
-    return result
-
-
 def _validated_area_level(code: str) -> Literal["sido", "sigungu"]:
     if len(code) == 2 and code.isdigit():
         opinet_sido_to_bjd(code)
@@ -78,67 +72,6 @@ def _validated_area_level(code: str) -> Literal["sido", "sigungu"]:
         opinet_sido_to_bjd(code[:2])
         return "sigungu"
     raise OpinetInvalidParameterError("area code must be a 2-digit sido or 4-digit sigungu code")
-
-
-@dataclass(frozen=True, slots=True)
-class KatecPoint:
-    """미터 단위 ``(x, y)`` 순서의 KATEC 좌표점."""
-
-    x: float
-    y: float
-
-    def __post_init__(self) -> None:
-        object.__setattr__(self, "x", _finite_float(self.x, "x"))
-        object.__setattr__(self, "y", _finite_float(self.y, "y"))
-
-    def as_x_y(self) -> tuple[float, float]:
-        """좌표를 ``(x, y)`` 튜플로 반환한다."""
-        return self.x, self.y
-
-
-@dataclass(frozen=True, slots=True)
-class Wgs84Point:
-    """``(lon, lat)`` 순서의 WGS84 좌표점."""
-
-    lon: float
-    lat: float
-
-    def __post_init__(self) -> None:
-        object.__setattr__(self, "lon", _finite_float(self.lon, "lon"))
-        object.__setattr__(self, "lat", _finite_float(self.lat, "lat"))
-
-    def as_lon_lat(self) -> tuple[float, float]:
-        """좌표를 ``(lon, lat)`` 튜플로 반환한다."""
-        return self.lon, self.lat
-
-
-@dataclass(frozen=True, slots=True)
-class StationCoordinates:
-    """KATEC과 WGS84 값을 함께 담는 재사용 주유소 좌표."""
-
-    katec: KatecPoint
-    wgs84: Wgs84Point
-
-    @classmethod
-    def from_values(cls, katec_x: float, katec_y: float, lon: float, lat: float) -> StationCoordinates:
-        return cls(katec=KatecPoint(katec_x, katec_y), wgs84=Wgs84Point(lon, lat))
-
-    @property
-    def katec_x(self) -> float:
-        return self.katec.x
-
-    @property
-    def katec_y(self) -> float:
-        return self.katec.y
-
-    @property
-    def lon(self) -> float:
-        return self.wgs84.lon
-
-    @property
-    def lat(self) -> float:
-        return self.wgs84.lat
-
 
 @dataclass(frozen=True, slots=True)
 class AvgPrice:
@@ -237,8 +170,12 @@ class Station:
         )
 
     @property
-    def coordinates(self) -> StationCoordinates:
-        return StationCoordinates.from_values(self.katec_x, self.katec_y, self.lon, self.lat)
+    def coordinate(self) -> PlaceCoordinate:
+        return PlaceCoordinate(lon=self.lon, lat=self.lat)
+
+    @property
+    def katec_coordinate(self) -> KatecPoint:
+        return KatecPoint(self.katec_x, self.katec_y)
 
     def trade_datetime(self, tz: str | tzinfo = "Asia/Seoul") -> datetime | None:
         """거래 날짜와 시간이 모두 있으면 시간대 정보가 포함된 datetime을 반환한다."""
@@ -315,8 +252,12 @@ class StationDetail:
         )
 
     @property
-    def coordinates(self) -> StationCoordinates:
-        return StationCoordinates.from_values(self.katec_x, self.katec_y, self.lon, self.lat)
+    def coordinate(self) -> PlaceCoordinate:
+        return PlaceCoordinate(lon=self.lon, lat=self.lat)
+
+    @property
+    def katec_coordinate(self) -> KatecPoint:
+        return KatecPoint(self.katec_x, self.katec_y)
 
     def to_normalized(self, *, endpoint: str = "detailById.do") -> NormalizedFuelStationDetail:
         """애플리케이션용 정규화 주유소 상세 레코드를 반환한다."""

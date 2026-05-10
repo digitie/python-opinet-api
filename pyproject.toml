@@ -11,8 +11,8 @@ requires-python = ">=3.11"
 license = { text = "GPL-3.0-or-later" }
 dependencies = [
     "requests>=2.28",
-    "pyproj>=3.5",
     "pydantic>=2.0",
+    "pykrtour[geo]>=0.1.0",
 ]
 
 [project.optional-dependencies]
@@ -39,3 +39,6 @@ addopts = "-ra"
 markers = [
     "live: tests that call the real Opinet API and require OPINET_API_KEY",
 ]
+
+[tool.mypy]
+mypy_path = "../pykrtour"

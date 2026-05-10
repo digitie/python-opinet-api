@@ -19,7 +19,7 @@
 - 저장소의 1차 범위는 공식 오픈 API 페이지에 등재된 5개 엔드포인트 구현이다.
 - PDF 가이드북의 추가 API는 검증 전까지 `opinet.experimental`에 둔다.
 - Python 3.11 이상을 기준으로 하며 `dataclass(frozen=True, slots=True)`와 `StrEnum`을 사용한다.
-- 런타임 의존성은 `requests`, `pyproj`이고 테스트는 `pytest`, `responses`, `pytest-cov`를 기준으로 한다.
+- 런타임 의존성은 `requests`, `pydantic`, `pykrtour[geo]`이고 테스트는 `pytest`, `responses`, `pytest-cov`를 기준으로 한다.
 - 라이선스는 루트 `LICENSE`를 따른다.
 
 ## 핵심 불변 조건
@@ -30,7 +30,7 @@
 - API 응답의 숫자, 날짜, 시간, 플래그는 문자열로 오더라도 모델 경계에서 Python 네이티브 타입으로 변환한다.
 - 선행 0이 의미 있는 값(`AREA_CD`, `SIGUNCD`, `UNI_ID`, 제품/상표 코드)은 `int`로 변환하지 않는다.
 - KATEC 좌표는 API 내부 좌표계이고, 공개 사용성은 WGS84를 함께 제공한다.
-- 좌표 변환은 `pyproj`와 `opinet-api.md`의 KATEC proj 정의를 사용한다. 직접 수식으로 재구현하지 않는다.
+- 좌표 변환은 `pykrtour.PlaceCoordinate`와 `pykrtour.KatecPoint`를 직접 사용한다. `opinet` 내부에 별도 wrapper, proxy dataclass, 호환 adapter를 만들지 않는다.
 - `LPG_YN`은 LPG 판매 여부가 아니라 업종 구분이며 `StationType`으로 매핑한다.
 - `KPETRO_YN`은 알뜰주유소 여부가 아니라 품질인증 여부이며 `is_kpetro`로 매핑한다.
 - 알뜰주유소 여부는 상표 코드 `RTE`, `RTX`, `NHO`로 판정한다.
@@ -47,7 +47,7 @@
 - HTTP/에러 매핑: `opinet/_http.py`
 - 타입 변환: `opinet/_convert.py`
 - 코드표/enum/시도 매핑: `opinet/codes.py`
-- 좌표 변환: `opinet/coords.py`
+- 공통 좌표/장소 DTO: `pykrtour.PlaceCoordinate`, `pykrtour.KatecPoint`
 - 응답 모델: `opinet/models.py`
 - 미검증 API: `opinet/experimental/`
 - 테스트 fixture: `tests/fixtures/`
@@ -66,6 +66,8 @@
 ## 작업 원칙
 - 구현 작업 전에는 `opinet-api.md`의 관련 엔드포인트 섹션과 `SKILL.md`의 불변 조건을 먼저 확인한다.
 - 변경은 가능한 한 작은 완성 단위로 만들고, 공개 API 이름과 타입 안정성을 우선한다.
+- 공통 타입이나 변환 로직이 `pykrtour` 같은 다른 TripMate 라이브러리에 이미 있으면 최소 수정 범위보다 직접 의존과 직접 적용을 우선한다.
+- 불필요한 compatibility wrapper, mirror dataclass, 단순 위임 함수는 만들지 않는다. 기존 공개 API를 깨야 하더라도 문서와 테스트를 함께 고쳐 공통 구현을 직접 쓰는 방향으로 정리한다.
 - 응답 파싱 로직은 raw 문자열을 사용자 모델에 그대로 흘리지 않는다.
 - HTTP 상태와 body 기반 오류 매핑은 `_http.py` 한 곳에 모은다.
 - 엔드포인트별 파라미터 검증은 HTTP 호출 전에 수행하고 `OpinetInvalidParameterError`를 사용한다.
@@ -81,7 +83,7 @@
 - 타입 검사: `python -m mypy opinet`
 - 실제 API 스모크: `pytest -m live --run-live` (`OPINET_API_KEY` 필요)
 - HTTP mocking 테스트는 `responses`를 사용한다.
-- 좌표 테스트는 강남역, 서울시청, 부산시청 같은 기준점과 실제 KATEC 응답값을 함께 검증한다.
+- 좌표 변환 자체는 `pykrtour` 테스트에서 검증하고, `pyopinet`에서는 요청/응답 모델 경계가 `PlaceCoordinate`와 `KatecPoint`를 직접 쓰는지 검증한다.
 - 타입 변환 테스트는 정상값, 빈 문자열/공백/None, 잘못된 포맷을 모두 포함한다.
 
 ## 반복 실수 방지
@@ -91,7 +93,7 @@
 - `RESULT.OIL`과 `OIL_PRICE`는 단일 dict일 수 있다. list로 단정하지 말고 정규화한다.
 - `POLL_DIV_CO`/`GPOLL_DIV_CO`가 실제 응답 우선 필드다. 문서 표기의 `*_CD`는 fallback으로만 사용한다.
 - 공백 1자(`" "`)는 값이 아니다. `strip_or_none()`으로 `None` 처리한다.
-- 좌표 테스트의 목적은 행정주소 권역 검증이다. 실제 `pyproj` 변환 결과를 확인하지 않고 임의의 좁은 범위를 쓰지 않는다.
+- `SIGUNCD`는 오피넷 4자리 시군구 코드이며 법정동 5자리 시군구 코드나 10자리 법정동코드와 일치한다고 가정하지 않는다.
 - 개발 의존성에서 `types-requests`를 빼면 `mypy opinet`이 스텁 부재로 실패한다.
 
 ## 에이전트 메모

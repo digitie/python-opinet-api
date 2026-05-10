@@ -9,9 +9,9 @@ from typing import Any, Literal, TypeAlias, TYPE_CHECKING
 from zoneinfo import ZoneInfo
 
 from pydantic import BaseModel, ConfigDict
+from pykrtour import KatecPoint, PlaceCoordinate
 
 from .codes import FuelType, StationType
-from .models import StationCoordinates
 
 if TYPE_CHECKING:
     from .models import AreaCode, AvgPrice, OilPrice, Station, StationDetail
@@ -88,7 +88,8 @@ class NormalizedFuelStation(_NormalizedModel):
     distance_m: float | None
     address_jibun: str | None
     address_road: str | None
-    coordinates: StationCoordinates
+    coordinate: PlaceCoordinate
+    katec_coordinate: KatecPoint
     katec_x: float
     katec_y: float
     lon: float
@@ -137,7 +138,8 @@ class NormalizedFuelStationDetail(_NormalizedModel):
     address_jibun: str | None
     address_road: str | None
     tel: str | None
-    coordinates: StationCoordinates
+    coordinate: PlaceCoordinate
+    katec_coordinate: KatecPoint
     katec_x: float
     katec_y: float
     lon: float
@@ -192,7 +194,8 @@ def normalize_station(station: Station, *, endpoint: str) -> NormalizedFuelStati
         distance_m=station.distance_m,
         address_jibun=station.address_jibun,
         address_road=station.address_road,
-        coordinates=station.coordinates,
+        coordinate=station.coordinate,
+        katec_coordinate=station.katec_coordinate,
         katec_x=station.katec_x,
         katec_y=station.katec_y,
         lon=station.lon,
@@ -220,7 +223,8 @@ def normalize_station_detail(
         address_jibun=detail.address_jibun,
         address_road=detail.address_road,
         tel=detail.tel,
-        coordinates=detail.coordinates,
+        coordinate=detail.coordinate,
+        katec_coordinate=detail.katec_coordinate,
         katec_x=detail.katec_x,
         katec_y=detail.katec_y,
         lon=detail.lon,

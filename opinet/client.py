@@ -4,8 +4,9 @@ from __future__ import annotations
 
 import os
 from datetime import date, time
-from math import isfinite
 from typing import Any
+
+from pykrtour import KatecPoint, PlaceCoordinate
 
 from ._convert import strip_or_none, to_bool_yn, to_date, to_float_or_none, to_time
 from ._http import _OpinetHttp
@@ -99,10 +100,8 @@ def _station_type(value: Any) -> StationType:
     return StationType(text)
 
 
-def _katec_to_wgs84(katec_x: float, katec_y: float) -> tuple[float, float]:
-    from .coords import katec_to_wgs84
-
-    return katec_to_wgs84(katec_x, katec_y)
+def _katec_to_place_coordinate(katec_x: float, katec_y: float) -> PlaceCoordinate:
+    return PlaceCoordinate.from_katec(KatecPoint(katec_x, katec_y))
 
 
 def _parse_error(endpoint: str, exc: Exception) -> OpinetServerError:
@@ -198,30 +197,27 @@ class OpinetClient:
     def search_stations_around(
         self,
         *,
-        wgs84: tuple[float, float] | None = None,
-        katec: tuple[float, float] | None = None,
+        coordinate: PlaceCoordinate | None = None,
+        katec: KatecPoint | None = None,
         radius_m: int = 5000,
         prodcd: ProductCode | str = ProductCode.GASOLINE,
         sort: SortOrder = SortOrder.PRICE,
     ) -> list[Station]:
         """주어진 좌표 반경 내 주유소를 검색한다.
 
-        ``aroundAll.do``(apiId=3)를 호출한다. 공개 입력은 WGS84 또는
-        KATEC 중 하나만 받을 수 있으며, 응답 모델에는 두 좌표계가 모두 들어간다.
+        ``aroundAll.do``(apiId=3)를 호출한다. 공개 입력은
+        ``pykrtour.PlaceCoordinate`` 또는 ``pykrtour.KatecPoint``만 받으며,
+        응답 모델에는 ``coordinate``와 KATEC 원본 좌표가 모두 들어간다.
         """
-        if (wgs84 is None) == (katec is None):
-            raise OpinetInvalidParameterError("pass exactly one of wgs84 or katec")
+        if (coordinate is None) == (katec is None):
+            raise OpinetInvalidParameterError("pass exactly one of coordinate or katec")
         if not 1 <= radius_m <= 5000:
             raise OpinetInvalidParameterError("radius_m must be between 1 and 5000")
-        if wgs84 is not None:
-            self._validate_pair(wgs84, "wgs84")
-            from .coords import wgs84_to_katec
-
-            x, y = wgs84_to_katec(*wgs84)
+        if coordinate is not None:
+            x, y = coordinate.to_katec().as_x_y()
         else:
             assert katec is not None
-            self._validate_pair(katec, "katec")
-            x, y = float(katec[0]), float(katec[1])
+            x, y = katec.as_x_y()
 
         product_code = _coerce_product_code(prodcd)
         endpoint = "aroundAll.do"
@@ -278,12 +274,6 @@ class OpinetClient:
             parsed.append(AreaCode(code=code, name=name, raw=row))
         return parsed
 
-    def _validate_pair(self, coords: tuple[float, float], name: str) -> None:
-        if len(coords) != 2:
-            raise OpinetInvalidParameterError(f"{name} must contain exactly two values")
-        if not all(isfinite(float(value)) for value in coords):
-            raise OpinetInvalidParameterError(f"{name} coordinate values must be finite")
-
     def _build_station(
         self,
         row: dict[str, Any],
@@ -294,7 +284,7 @@ class OpinetClient:
         try:
             katec_x = _require_float(row.get("GIS_X_COOR"), "GIS_X_COOR", endpoint)
             katec_y = _require_float(row.get("GIS_Y_COOR"), "GIS_Y_COOR", endpoint)
-            lon, lat = _katec_to_wgs84(katec_x, katec_y)
+            coordinate = _katec_to_place_coordinate(katec_x, katec_y)
             product_code = _optional_product_code(row.get("PRODCD")) or request_product_code
             return Station(
                 uni_id=str(row["UNI_ID"]),
@@ -305,8 +295,8 @@ class OpinetClient:
                 address_road=strip_or_none(row.get("NEW_ADR")),
                 katec_x=katec_x,
                 katec_y=katec_y,
-                lon=lon,
-                lat=lat,
+                lon=coordinate.lon,
+                lat=coordinate.lat,
                 distance_m=to_float_or_none(row.get("DISTANCE")),
                 product_code=product_code,
                 product_name=strip_or_none(row.get("PRODNM")),
@@ -321,7 +311,7 @@ class OpinetClient:
         try:
             katec_x = _require_float(row.get("GIS_X_COOR"), "GIS_X_COOR", endpoint)
             katec_y = _require_float(row.get("GIS_Y_COOR"), "GIS_Y_COOR", endpoint)
-            lon, lat = _katec_to_wgs84(katec_x, katec_y)
+            coordinate = _katec_to_place_coordinate(katec_x, katec_y)
             prices = tuple(
                 self._build_oil_price(item, endpoint)
                 for item in _normalize_items(row.get("OIL_PRICE"), "OIL_PRICE", endpoint)
@@ -341,8 +331,8 @@ class OpinetClient:
                 tel=strip_or_none(row.get("TEL")),
                 katec_x=katec_x,
                 katec_y=katec_y,
-                lon=lon,
-                lat=lat,
+                lon=coordinate.lon,
+                lat=coordinate.lat,
                 has_maintenance=to_bool_yn(row.get("MAINT_YN")),
                 has_carwash=to_bool_yn(row.get("CAR_WASH_YN")),
                 has_cvs=to_bool_yn(row.get("CVS_YN")),

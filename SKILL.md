@@ -1,6 +1,6 @@
 ---
 name: opinet-python-builder
-description: Use this skill when the user asks to build, extend, debug, or test a Python client library for the Korean Opinet (오피넷) free fuel-price API. Triggers include any mention of "오피넷", "opinet", "유가정보 API", "주유소 가격 API", or filenames like opinet/client.py. Also use when implementing KATEC↔WGS84 coordinate conversion for Korean fuel-station data, mapping Opinet sido codes to BJD (법정동) codes, or mapping Opinet HTTP/body errors to Python exceptions. Do NOT use for unrelated KNOC datasets, gov.kr public data portal datasets, or non-Korean fuel APIs.
+description: Use this skill when the user asks to build, extend, debug, or test a Python client library for the Korean Opinet (오피넷) free fuel-price API. Triggers include any mention of "오피넷", "opinet", "유가정보 API", "주유소 가격 API", or filenames like opinet/client.py. Also use when wiring Opinet KATEC/WGS84 coordinates through pykrtour, mapping Opinet sido codes to BJD (법정동) codes, or mapping Opinet HTTP/body errors to Python exceptions. Do NOT use for unrelated KNOC datasets, gov.kr public data portal datasets, or non-Korean fuel APIs.
 ---
 
 # Opinet Python Library Builder
@@ -12,7 +12,7 @@ You are helping build/maintain a Python client for the Korean **Opinet** free fu
 1. **Base URL**: `https://www.opinet.co.kr/api/`
 2. **Auth parameter**: `certkey` (NOT `code`). The official site uses `certkey`. Some unofficial blogs use `code` — that's a different gateway (PDF guidebook's `custApi`).
 3. **Output format**: always request `out=json`. XML is debug-only.
-4. **Coordinate system**: every response coordinate (`GIS_X_COOR`, `GIS_Y_COOR`) and every request coordinate (`x`, `y` for `aroundAll.do`) is **KATEC**. The library's public surface is **WGS84**; KATEC is internal.
+4. **Coordinate system**: every response coordinate (`GIS_X_COOR`, `GIS_Y_COOR`) and every request coordinate (`x`, `y` for `aroundAll.do`) is **KATEC**. Use `pykrtour.PlaceCoordinate` for WGS84 and `pykrtour.KatecPoint` for KATEC directly.
 5. **Quota**: ~1,500 calls/day per the PDF guidebook. Do not add automatic retries for 401/403/429.
 6. **No XML parsing in user-facing methods**.
 7. **All response fields are converted to Python native types** before the model is returned to the user. The API itself returns everything as strings. See "Type conversion policy" below.
@@ -29,6 +29,13 @@ You are helping build/maintain a Python client for the Korean **Opinet** free fu
 1. 이 Windows/PowerShell 환경에서는 `rg`가 실행 권한 문제로 실패할 수 있다. 실패하면 반복 시도하지 말고 `git ls-files`, `Get-ChildItem -Recurse -File`, `Select-String`을 사용한다.
 2. 한글 Markdown/Python 파일을 PowerShell에서 읽을 때는 `Get-Content -Encoding utf8` 또는 `Get-Content -Raw -Encoding utf8`을 사용한다.
 3. PowerShell 기본 출력에서 한글이 깨져 보이면 파일 손상으로 간주하지 말고 UTF-8 인코딩을 명시해서 재확인한다.
+
+## Shared-library reuse invariants
+
+1. 공통 타입, 좌표 변환, POI 정규화처럼 다른 TripMate 라이브러리에 이미 구현된 기능은 `opinet` 안에 다시 만들지 말고 해당 라이브러리를 직접 의존한다.
+2. `pykrtour`가 제공하는 `PlaceCoordinate`, `KatecPoint` 같은 값 객체는 파라미터와 리턴 모델에서 그대로 사용한다. 단순 wrapper, compatibility alias, mirror dataclass, proxy method를 새로 만들지 않는다.
+3. 이 원칙은 "최소 수정"보다 우선한다. 직접 의존으로 공개 API 변경이 필요하면 README, `opinet-api.md`, tests를 함께 바꿔 새 경계를 명확히 한다.
+4. `SIGUNCD`는 오피넷 자체 4자리 시군구 코드다. 법정동 5자리 시군구 코드나 10자리 법정동코드와 같다고 추정하거나 `pykrtour` 법정동 DTO로 강제 변환하지 않는다.
 
 ## Five official endpoints (start here)
 
@@ -57,7 +64,6 @@ opinet/
 │                             # is_alddle()
 │                             # OPINET_TO_BJD / BJD_TO_OPINET / BJD_LEGACY_TO_NEW (sido mapping)
 │                             # opinet_sido_to_bjd / bjd_sido_to_opinet
-├── opinet/coords.py          # wgs84_to_katec, katec_to_wgs84 (pyproj)
 ├── opinet/models.py          # frozen slots dataclasses (Python native types)
 ├── opinet/experimental/
 │   ├── __init__.py
@@ -65,7 +71,7 @@ opinet/
 ├── tests/conftest.py
 ├── tests/fixtures/*.json     # captured responses (see "Initial fixtures" below)
 ├── tests/test_*.py
-└── pyproject.toml            # deps: requests, pyproj; dev: pytest, responses, pytest-cov
+└── pyproject.toml            # deps: requests, pydantic, pykrtour[geo]; dev: pytest, responses, pytest-cov
 ```
 
 ## Type conversion policy ⭐ CRITICAL
@@ -224,13 +230,9 @@ Type conversion errors (e.g., bad date format from server) should be caught at t
 
 ## KATEC ↔ WGS84
 
-Use `pyproj.Transformer` with this proj string (do not hand-roll):
+Opinet KATEC 변환 로직은 `pykrtour`에 둔다. `opinet`은 `pykrtour.PlaceCoordinate.to_katec()`, `PlaceCoordinate.from_katec()`, `pykrtour.KatecPoint`를 직접 호출하고, 내부 `coords.py`나 얇은 wrapper를 다시 만들지 않는다.
 
-```
-+proj=tmerc +lat_0=38 +lon_0=128 +k=0.9999 +x_0=400000 +y_0=600000 +ellps=bessel +units=m +towgs84=-115.80,474.99,674.11,1.16,-2.31,-1.63,6.43 +no_defs
-```
-
-Build the two transformers as **module-level singletons** (Transformer construction is expensive). Always pass `always_xy=True`. Roundtrip tolerance for tests: ±1e-5° (≈ 1 m).
+좌표 변환의 proj 문자열, transformer singleton, roundtrip tolerance는 `pykrtour` 테스트와 문서가 소유한다. `opinet` 테스트는 aroundAll 요청 파라미터가 `PlaceCoordinate`/`KatecPoint`에서 나온 값인지, 응답 모델이 같은 값 객체를 리턴하는지만 검증한다.
 
 ## Critical field gotchas (DO NOT misinterpret)
 
@@ -517,9 +519,9 @@ def _build_station(oil: dict) -> Station:
 - Don't add LPG_YN/KPETRO_YN to the model with their literal names — use `station_type` and `is_kpetro` to avoid future readers misinterpreting.
 - Don't hardcode sido codes from memory or unofficial sources. Use the official 17-entry table from `opinet-api.md` §2.2.
 - Don't silently coerce `int` for codes with leading zeros — `"0113"` != `113`. Keep them `str`.
-- `pyproj` is a heavy import — keep it confined to `coords.py`.
+- 좌표 변환은 `pykrtour` 값 객체를 직접 사용한다. `opinet.coords`, 단순 wrapper, legacy alias를 되살리지 않는다.
 - KATEC has multiple "dialects" in the wild (different `+towgs84` values). The values in this skill match Opinet's published station coordinates within ±10 m. Don't change without re-verifying.
-- For BJD mapping, don't try to derive sigungu (4-digit) codes algorithmically. They're not mappable.
+- For BJD mapping, don't try to derive Opinet sigungu (4-digit) codes algorithmically. They're not BJD sigungu/legal-dong codes and are not mappable without an explicit table.
 - `StationDetail` uses `tel`, not `phone`.
 - `OilPrice` does not include `product_name`; official `OIL_PRICE` rows do not include `PRODNM`.
 - Keep fixture numeric/date/time values as strings. Turning them into JSON numbers weakens conversion tests.

@@ -23,7 +23,9 @@ PDF 가이드북의 추가 API는 아직 공식 명세 페이지가 없으므로
 - 엔드포인트 파라미터 오류는 HTTP 호출 전에 `OpinetInvalidParameterError`로 실패시킵니다.
 - API 응답은 모델 생성 전에 `date`, `time`, `float`, `bool`, `StrEnum`으로 변환합니다.
 - `AREA_CD`, `SIGUNCD`, `UNI_ID`, 제품 코드, 상표 코드는 정수로 변환하지 않습니다.
-- KATEC 변환은 `opinet/coords.py`의 `pyproj` transformer만 사용합니다.
+- KATEC 변환은 `pykrtour.PlaceCoordinate`와 `pykrtour.KatecPoint`를 직접 사용합니다.
+- 공통 기능이 `pykrtour` 같은 다른 TripMate 라이브러리에 구현돼 있으면 최소 수정보다 직접 의존을 우선합니다. 얇은 wrapper나 mirror dataclass는 만들지 않습니다.
+- `SIGUNCD`는 오피넷 자체 4자리 시군구 코드이며 법정동 시군구 코드나 10자리 법정동코드로 추정 변환하지 않습니다.
 - 문서에서 파일 위치는 프로젝트 루트 기준 상대 경로로 표기합니다.
 - Python 내부 문서(docstring과 유지보수용 주석)는 한글로 작성합니다. 외부 API 고유 명칭과 코드 식별자는 원문을 유지합니다.
 - 이 Windows/PowerShell 환경에서는 `rg`가 실행 권한 문제로 실패할 수 있으므로, 실패 시 `git ls-files`, `Get-ChildItem -Recurse -File`, `Select-String`으로 파일 목록과 검색을 수행합니다.
@@ -37,7 +39,7 @@ PDF 가이드북의 추가 API는 아직 공식 명세 페이지가 없으므로
 |---|---|---|
 | Type conversion | `tests/test_convert.py` | 날짜/시간/숫자/불리언/공백 처리 |
 | Code mappings | `tests/test_codes.py` | Opinet ↔ BJD 시도 매핑, 알뜰 상표 판정 |
-| Coordinates | `tests/test_coords.py` | WGS84↔KATEC 왕복, 실제 주유소 KATEC 권역 |
+| Coordinates | `pykrtour` 테스트, `tests/test_client_endpoints.py` | WGS84↔KATEC 변환은 `pykrtour`, 오피넷 요청/응답 경계는 클라이언트 테스트 |
 | HTTP errors | `tests/test_http.py` | 인증/쿼터/5xx/네트워크/JSON 오류 |
 | Endpoints | `tests/test_client_endpoints.py` | 공식 5개 API의 타입, 파라미터, 빈 결과, 단일 dict 응답 |
 | Experimental boundary | `tests/test_experimental.py` | 미검증 API가 명시적으로 unimplemented임을 고정 |
@@ -86,7 +88,7 @@ pytest -m live --run-live
 - `RESULT.OIL`과 `OIL_PRICE`는 list뿐 아니라 단일 dict로 올 수 있습니다.
 - 실제 응답의 상표 필드는 `POLL_DIV_CO`, `GPOLL_DIV_CO`가 우선입니다. `*_CD`는 fallback입니다.
 - 공백 1자(`" "`)는 의미 있는 문자열이 아니라 `None`입니다.
-- 좌표 테스트 범위는 주소 권역 검증용입니다. 소수점 범위를 너무 좁히면 `pyproj` 버전/환경 차이로 불필요하게 깨질 수 있습니다.
+- 좌표 변환 정밀도는 `pykrtour` 테스트가 소유합니다. `pyopinet`에서는 오피넷 모델 경계가 `PlaceCoordinate`/`KatecPoint`를 직접 쓰는지 확인합니다.
 - `types-requests`는 `mypy`용 개발 의존성입니다. 제거하면 타입 검사가 실패합니다.
 
 ## 다음 작업 기준
@@ -112,11 +114,11 @@ pytest -m live --run-live
 |---|---|
 | canonical 유종 | `FuelType` 및 `CanonicalFuelType` alias |
 | 유종 mapping | `product_code_to_fuel_type()`, `fuel_type_to_product_code()` |
-| 좌표 value object | `KatecPoint(x, y)`, `Wgs84Point(lon, lat)`, `StationCoordinates` |
+| 좌표 value object | `pykrtour.PlaceCoordinate`, `pykrtour.KatecPoint` |
 | raw payload | `AvgPrice.raw`, `Station.raw`, `StationDetail.raw`, `OilPrice.raw`, `AreaCode.raw` |
 | Station product context | `Station.product_code`, `Station.product_name` |
 | Station trade context | `Station.trade_date`, `Station.trade_time` |
-| Station normalized helpers | `provider_station_id`, `provider_product_code`, `provider_product_name`, `fuel_type`, `brand_code`, `coordinates` |
+| Station normalized helpers | `provider_station_id`, `provider_product_code`, `provider_product_name`, `fuel_type`, `brand_code`, `coordinate`, `katec_coordinate` |
 | AvgPrice normalized helpers | `provider_product_code`, `provider_product_name`, `fuel_type` |
 | OilPrice helper | `provider_product_code`, `fuel_type` |
 | AreaCode helpers | `code_level`, `parent_sido_code`, `bjd_sido_prefix` |
@@ -159,11 +161,12 @@ pytest -m live --run-live
 ### 사용 예시
 
 ```python
+from pykrtour import PlaceCoordinate
 from opinet import OpinetClient, ProductCode
 
 client = OpinetClient()
 station = client.search_stations_around(
-    wgs84=(127.0276, 37.4979),
+    coordinate=PlaceCoordinate(lon=127.0276, lat=37.4979),
     prodcd=ProductCode.DIESEL,
 )[0]
 

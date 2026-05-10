@@ -759,28 +759,13 @@ PDF 가이드북에는 무료 API 22종이 명시되어 있지만, 공식 사이
 +proj=tmerc +lat_0=38 +lon_0=128 +k=0.9999 +x_0=400000 +y_0=600000 +ellps=bessel +units=m +towgs84=-115.80,474.99,674.11,1.16,-2.31,-1.63,6.43 +no_defs
 ```
 
-### 5.2 Python 구현 (`pyproj`)
+### 5.2 Python 구현 (`pykrtour`)
 
 ```python
-from pyproj import Transformer
+from pykrtour import KatecPoint, PlaceCoordinate
 
-KATEC_PROJ = (
-    "+proj=tmerc +lat_0=38 +lon_0=128 +k=0.9999 "
-    "+x_0=400000 +y_0=600000 +ellps=bessel +units=m "
-    "+towgs84=-115.80,474.99,674.11,1.16,-2.31,-1.63,6.43 +no_defs"
-)
-
-# Transformer 인스턴스는 모듈-레벨 싱글톤 (생성 비용 큼)
-_TO_KATEC = Transformer.from_crs("EPSG:4326", KATEC_PROJ, always_xy=True)
-_TO_WGS84 = Transformer.from_crs(KATEC_PROJ, "EPSG:4326", always_xy=True)
-
-def wgs84_to_katec(lon: float, lat: float) -> tuple[float, float]:
-    """WGS84 위경도(°)를 KATEC 직각좌표(m)로 변환. 반환 (x, y)."""
-    return _TO_KATEC.transform(lon, lat)
-
-def katec_to_wgs84(x: float, y: float) -> tuple[float, float]:
-    """KATEC 직각좌표(m)를 WGS84로 변환. 반환 (lon, lat)."""
-    return _TO_WGS84.transform(x, y)
+x, y = PlaceCoordinate(lon=127.0276, lat=37.4979).to_katec().as_x_y()
+coord = PlaceCoordinate.from_katec(KatecPoint(314871.80, 544012.00))
 ```
 
 ### 5.3 검증 기준점
@@ -873,6 +858,13 @@ class OpinetNetworkError(OpinetError):
 - Windows/PowerShell 환경에서 `rg`가 실행 권한 문제로 실패하면 반복 시도하지 말고 `git ls-files`, `Get-ChildItem -Recurse -File`, `Select-String`으로 우회합니다.
 - 한글 문서/소스 파일은 `Get-Content -Encoding utf8` 또는 `Get-Content -Raw -Encoding utf8`로 확인합니다. PowerShell 기본 출력에서 한글이 깨져 보이면 UTF-8로 다시 읽습니다.
 
+### 7.0.1 공통 라이브러리 직접 사용
+
+- 좌표, 장소 DTO, POI 정규화처럼 다른 TripMate 라이브러리에 이미 구현된 기능은 `opinet` 안에 복제하지 않고 해당 라이브러리를 직접 의존합니다.
+- KATEC/WGS84 경계는 `pykrtour.PlaceCoordinate`와 `pykrtour.KatecPoint`를 파라미터와 리턴 모델에 그대로 노출합니다. 단순 wrapper, compatibility alias, mirror dataclass는 만들지 않습니다.
+- 이 원칙은 "최소 수정"보다 우선합니다. 직접 의존으로 공개 API가 바뀌면 README, 테스트, 타입 힌트를 함께 갱신해 새 계약을 명확히 합니다.
+- `SIGUNCD`는 오피넷 자체 4자리 시군구 코드입니다. 법정동 5자리 시군구 코드나 10자리 법정동코드와 일치한다고 추정하지 않습니다.
+
 ### 7.1 패키지 구조
 
 ```
@@ -885,7 +877,6 @@ opinet/
 │   ├── exceptions.py        # 예외 계층
 │   ├── codes.py             # ProductCode, BrandCode, SortOrder, StationType (StrEnum)
 │   │                        # + 시도코드 ↔ 법정동코드 매핑
-│   ├── coords.py            # KATEC ↔ WGS84
 │   ├── models.py            # frozen slots dataclasses (Python 네이티브 타입)
 │   └── experimental/        # PDF 가이드북 17종 (검증되지 않음)
 │       ├── __init__.py
@@ -896,7 +887,6 @@ opinet/
 │   ├── test_client.py
 │   ├── test_convert.py      # 타입 변환 헬퍼 단위테스트
 │   ├── test_codes.py        # 시도코드 매핑 포함
-│   ├── test_coords.py
 │   ├── test_exceptions.py
 │   ├── test_models.py
 │   └── test_endpoints/
@@ -1048,8 +1038,8 @@ class OpinetClient:
     def search_stations_around(
         self,
         *,
-        wgs84: tuple[float, float] | None = None,
-        katec: tuple[float, float] | None = None,
+        coordinate: PlaceCoordinate | None = None,
+        katec: KatecPoint | None = None,
         radius_m: int = 5000,
         prodcd: ProductCode = ProductCode.GASOLINE,
         sort: SortOrder = SortOrder.PRICE,
@@ -1082,8 +1072,8 @@ class OpinetClient:
 def search_stations_around(
     self,
     *,
-    wgs84: tuple[float, float] | None = None,
-    katec: tuple[float, float] | None = None,
+    coordinate: PlaceCoordinate | None = None,
+    katec: KatecPoint | None = None,
     radius_m: int = 5000,
     prodcd: ProductCode = ProductCode.GASOLINE,
     sort: SortOrder = SortOrder.PRICE,
@@ -1091,17 +1081,18 @@ def search_stations_around(
     """주어진 좌표 반경 내 주유소를 검색한다.
 
     오피넷 ``aroundAll.do`` 엔드포인트(apiId=3)를 호출한다. 입력 좌표는
-    WGS84 또는 KATEC 둘 중 하나로만 받을 수 있고, 응답의 KATEC 좌표는
-    자동으로 WGS84로 변환되어 ``Station.lon, Station.lat``에 채워진다.
+    ``pykrtour.PlaceCoordinate`` 또는 KATEC 둘 중 하나로만 받을 수 있고,
+    응답의 KATEC 좌표는 자동으로 WGS84로 변환되어
+    ``Station.coordinate``에 채워진다.
 
     응답 데이터의 모든 필드는 Python 네이티브 타입으로 변환되어 들어간다:
     ``price``/``distance_m``/``katec_*``/``lon``/``lat``은 ``float``,
     ``brand``는 ``BrandCode`` enum.
 
     Args:
-        wgs84: ``(lon, lat)`` 형식의 WGS84 좌표(°). 내부에서 KATEC으로
-            변환되어 API에 전달된다. ``katec``과 동시에 줄 수 없다.
-        katec: ``(x, y)`` 형식의 KATEC 좌표(m). 변환 없이 그대로 전달.
+        coordinate: ``pykrtour.PlaceCoordinate`` WGS84 좌표. 내부에서 KATEC으로
+            변환되어 API에 전달된다.
+        katec: ``pykrtour.KatecPoint`` KATEC 좌표(m). 변환 없이 그대로 전달.
         radius_m: 검색 반경(미터). 1 ≤ radius_m ≤ 5000.
         prodcd: 제품 종류. 기본 ``ProductCode.GASOLINE`` (B027 휘발유).
         sort: 정렬 기준. ``SortOrder.PRICE`` 또는 ``SortOrder.DISTANCE``.
@@ -1122,7 +1113,7 @@ def search_stations_around(
     Example:
         >>> client = OpinetClient(api_key="...")  # doctest: +SKIP
         >>> stations = client.search_stations_around(  # doctest: +SKIP
-        ...     wgs84=(127.0276, 37.4979),  # 강남역
+        ...     coordinate=PlaceCoordinate(lon=127.0276, lat=37.4979),  # 강남역
         ...     radius_m=3000,
         ...     prodcd=ProductCode.DIESEL,
         ... )
@@ -1211,7 +1202,7 @@ tests/fixtures/
 - 모든 17개 시도 양방향 roundtrip.
 
 #### `search_stations_around` 추가
-- `wgs84`만 줬을 때 KATEC 변환되어 query에 들어가는지.
+- `coordinate`만 줬을 때 KATEC 변환되어 query에 들어가는지.
 - `katec`만 줬을 때 변환 없이 그대로.
 - 응답 KATEC → WGS84 변환이 모델에 반영.
 - 둘 다 None / 둘 다 줌 → `OpinetInvalidParameterError`.
@@ -1340,7 +1331,7 @@ def test_around_all_types(client, load_fixture):
     )
 
     stations = client.search_stations_around(
-        wgs84=(127.0276, 37.4979),
+        coordinate=PlaceCoordinate(lon=127.0276, lat=37.4979),
         radius_m=3000,
         prodcd=ProductCode.GASOLINE,
         sort=SortOrder.PRICE,
@@ -1360,9 +1351,9 @@ def test_around_all_types(client, load_fixture):
 
 @pytest.mark.parametrize("kwargs", [
     dict(),
-    dict(wgs84=(127.0, 37.5), katec=(300000, 540000)),
-    dict(wgs84=(127.0, 37.5), radius_m=0),
-    dict(wgs84=(127.0, 37.5), radius_m=6000),
+    dict(coordinate=PlaceCoordinate(lon=127.0, lat=37.5), katec=KatecPoint(300000, 540000)),
+    dict(coordinate=PlaceCoordinate(lon=127.0, lat=37.5), radius_m=0),
+    dict(coordinate=PlaceCoordinate(lon=127.0, lat=37.5), radius_m=6000),
 ])
 def test_around_all_invalid(client, kwargs):
     with pytest.raises(OpinetInvalidParameterError):
@@ -1456,9 +1447,9 @@ def test_all_17_sidos_mapped():
 ```
 
 ```python
-# tests/test_coords.py
+# pykrtour/tests/test_coordinates.py
 import pytest
-from opinet.coords import wgs84_to_katec, katec_to_wgs84
+from pykrtour import KatecPoint, PlaceCoordinate
 
 
 @pytest.mark.parametrize("lon,lat", [
@@ -1467,10 +1458,10 @@ from opinet.coords import wgs84_to_katec, katec_to_wgs84
     (129.0756, 35.1796),  # 부산시청
 ])
 def test_roundtrip(lon, lat):
-    x, y = wgs84_to_katec(lon, lat)
-    lon2, lat2 = katec_to_wgs84(x, y)
-    assert abs(lon2 - lon) < 1e-5
-    assert abs(lat2 - lat) < 1e-5
+    katec = PlaceCoordinate(lon=lon, lat=lat).to_katec()
+    coord = PlaceCoordinate.from_katec(katec)
+    assert abs(coord.lon - lon) < 1e-5
+    assert abs(coord.lat - lat) < 1e-5
 
 
 @pytest.mark.parametrize("katec,lon_range,lat_range", [
@@ -1479,16 +1470,16 @@ def test_roundtrip(lon, lat):
     ((430907.88, 392046.93), (128.32, 128.36), (36.10, 36.14)),  # 구미 오일드림
 ])
 def test_real_station_coords(katec, lon_range, lat_range):
-    lon, lat = katec_to_wgs84(*katec)
-    assert lon_range[0] < lon < lon_range[1]
-    assert lat_range[0] < lat < lat_range[1]
+    coord = PlaceCoordinate.from_katec(KatecPoint(*katec))
+    assert lon_range[0] < coord.lon < lon_range[1]
+    assert lat_range[0] < coord.lat < lat_range[1]
 
 
 def test_invalid_input():
     with pytest.raises(ValueError):
-        wgs84_to_katec(float("nan"), 37.5)
+        PlaceCoordinate(lon=float("nan"), lat=37.5).to_katec()
     with pytest.raises(ValueError):
-        katec_to_wgs84(float("inf"), 540000)
+        PlaceCoordinate.from_katec(KatecPoint(float("inf"), 540000))
 ```
 
 ### 8.5 커버리지

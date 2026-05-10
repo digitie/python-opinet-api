@@ -23,7 +23,7 @@ from .exceptions import (
     OpinetRateLimitError,
     OpinetServerError,
 )
-from .models import AreaCode, AvgPrice, KatecPoint, OilPrice, Station, StationCoordinates, StationDetail, Wgs84Point
+from .models import AreaCode, AvgPrice, OilPrice, Station, StationDetail
 from .normalized import (
     NormalizedFuelAverage,
     NormalizedFuelRegionCode,
@@ -40,7 +40,6 @@ __all__ = [
     "BrandCode",
     "CanonicalFuelType",
     "FuelType",
-    "KatecPoint",
     "NormalizedFuelAverage",
     "NormalizedFuelRegionCode",
     "NormalizedFuelStation",
@@ -58,10 +57,8 @@ __all__ = [
     "ProductCode",
     "SortOrder",
     "Station",
-    "StationCoordinates",
     "StationDetail",
     "StationType",
-    "Wgs84Point",
     "bjd_sido_to_opinet",
     "fuel_type_to_product_code",
     "is_alddle",

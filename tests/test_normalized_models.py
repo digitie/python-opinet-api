@@ -2,15 +2,13 @@ from datetime import date, time
 
 import pytest
 import responses
+from pykrtour import PlaceCoordinate
 
 from opinet import (
     AreaCode,
     FuelType,
-    KatecPoint,
     OpinetClient,
     ProductCode,
-    StationCoordinates,
-    Wgs84Point,
     fuel_type_to_product_code,
     product_code_to_fuel_type,
 )
@@ -67,24 +65,6 @@ def test_area_code_invalid_level_raises(code):
         _ = area.code_level
 
 
-def test_coordinate_value_objects_validate_order_and_values():
-    katec = KatecPoint(314871.8, 544012.0)
-    wgs84 = Wgs84Point(127.04, 37.5)
-    coordinates = StationCoordinates(katec=katec, wgs84=wgs84)
-
-    assert katec.as_x_y() == (314871.8, 544012.0)
-    assert wgs84.as_lon_lat() == (127.04, 37.5)
-    assert coordinates.katec_x == 314871.8
-    assert coordinates.katec_y == 544012.0
-    assert coordinates.lon == 127.04
-    assert coordinates.lat == 37.5
-
-    with pytest.raises(ValueError):
-        KatecPoint(float("nan"), 544012.0)
-    with pytest.raises(ValueError):
-        Wgs84Point(127.04, float("inf"))
-
-
 @responses.activate
 def test_avg_price_normalized_fields_and_raw(client, load_fixture):
     responses.add(responses.GET, OPINET_BASE_URL + "avgAllPrice.do", json=load_fixture("avg_all_price.json"))
@@ -118,12 +98,8 @@ def test_station_request_product_context_coordinates_and_raw(client, load_fixtur
     assert station.raw["PRICE"] == "1538"
     assert station.price == pytest.approx(1538.0)
 
-    coordinates = station.coordinates
-    assert isinstance(coordinates, StationCoordinates)
-    assert coordinates.katec_x == station.katec_x
-    assert coordinates.katec_y == station.katec_y
-    assert coordinates.lon == station.lon
-    assert coordinates.lat == station.lat
+    assert station.katec_coordinate.as_x_y() == (station.katec_x, station.katec_y)
+    assert station.coordinate.as_lon_lat() == pytest.approx((station.lon, station.lat))
     with pytest.raises(TypeError):
         station.raw["PRICE"] = "0"
 
@@ -154,7 +130,10 @@ def test_station_response_product_and_trade_context_prefer_response(client, load
 def test_around_station_request_product_context(client, load_fixture):
     responses.add(responses.GET, OPINET_BASE_URL + "aroundAll.do", json=load_fixture("around_all_gangnam.json"))
 
-    stations = client.search_stations_around(wgs84=(127.0276, 37.4979), prodcd=ProductCode.DIESEL)
+    stations = client.search_stations_around(
+        coordinate=PlaceCoordinate(lon=127.0276, lat=37.4979),
+        prodcd=ProductCode.DIESEL,
+    )
 
     assert stations[0].product_code is ProductCode.DIESEL
     assert stations[0].provider_product_code == "D047"

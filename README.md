@@ -77,17 +77,19 @@ for row in client.get_national_average_price():
     assert isinstance(row.product_code, ProductCode)  # "B027" → enum
     print(f"{row.product_name}: {row.price:,.2f}원 ({row.diff:+.2f}) — {row.trade_date}")
 
-# 2) 강남역 반경 3km 내 가장 싼 휘발유 5곳 — 좌표 자동 변환
+# 2) 강남역 반경 3km 내 가장 싼 휘발유 5곳 — pykrtour 좌표 DTO 사용
+from pykrtour import PlaceCoordinate
+
 stations = client.search_stations_around(
-    wgs84=(127.0276, 37.4979),  # 강남역 위경도
+    coordinate=PlaceCoordinate(lon=127.0276, lat=37.4979),  # 강남역 위경도
     radius_m=3000,
     prodcd=ProductCode.GASOLINE,
     sort=SortOrder.PRICE,
 )
 for s in stations[:5]:
-    # KATEC, WGS84 모두 float
+    # coordinate는 pykrtour.PlaceCoordinate, KATEC 원본은 KatecPoint
     print(f"{s.name}: {s.price:,.0f}원, {s.distance_m:.0f}m, "
-          f"({s.lon:.4f}, {s.lat:.4f})")
+          f"({s.coordinate.lon:.4f}, {s.coordinate.lat:.4f})")
 
 # 3) 주유소 ID로 상세 조회
 detail = client.get_station_detail("A0010207")
@@ -182,25 +184,32 @@ is_alddle(BrandCode.SKE)  # False
 
 오피넷 API는 모든 좌표를 **KATEC** (오피넷 자체 TM 좌표계, m 단위)로 주고받습니다. 일반적인 위경도(WGS84)와 다릅니다.
 
-본 라이브러리는 사용자 인터페이스를 **WGS84로 통일**하고, KATEC 변환은 내부에서 자동 처리합니다.
+본 라이브러리는 사용자 입력을 `pykrtour.PlaceCoordinate`로 받고, KATEC 변환은 `pykrtour`의 좌표 객체가 처리합니다.
 
 ```python
-# 입력: WGS84 (lon, lat)
-stations = client.search_stations_around(wgs84=(127.0276, 37.4979), ...)
+from pykrtour import PlaceCoordinate
 
-# 응답 모델: WGS84 + KATEC 둘 다 들어있음
+# 입력: pykrtour.PlaceCoordinate (WGS84 lon/lat)
+stations = client.search_stations_around(
+    coordinate=PlaceCoordinate(lon=127.0276, lat=37.4979),
+    ...
+)
+
+# 응답 모델: PlaceCoordinate + KATEC 원본 둘 다 들어있음
 station = stations[0]
-station.lon, station.lat          # WGS84 (변환된 값, float)
-station.katec_x, station.katec_y  # KATEC (서버가 준 원본, float)
+station.coordinate                # pykrtour.PlaceCoordinate
+station.katec_coordinate          # pykrtour.KatecPoint
+station.lon, station.lat          # 호환용 WGS84 float
+station.katec_x, station.katec_y  # 호환용 KATEC float
 ```
 
-직접 변환이 필요하면:
+직접 변환이 필요하면 `pykrtour`를 바로 사용합니다:
 
 ```python
-from opinet.coords import wgs84_to_katec, katec_to_wgs84
+from pykrtour import KatecPoint, PlaceCoordinate
 
-x, y = wgs84_to_katec(127.0276, 37.4979)
-lon, lat = katec_to_wgs84(314871.80, 544012.00)  # SK서광주유소
+x, y = PlaceCoordinate(lon=127.0276, lat=37.4979).to_katec().as_x_y()
+coord = PlaceCoordinate.from_katec(KatecPoint(314871.80, 544012.00))  # SK서광주유소
 ```
 
 ### KATEC proj 정의
@@ -267,6 +276,7 @@ bjd_sido_to_opinet("52")  # → "06" (전북특별자치도 신코드 → 오피
 ## 에러 처리
 
 ```python
+from pykrtour import PlaceCoordinate
 from opinet.exceptions import (
     OpinetError,                  # 공통 베이스
     OpinetAuthError,              # 인증 실패 (Invalid Key, 401, 403)
@@ -278,7 +288,10 @@ from opinet.exceptions import (
 )
 
 try:
-    stations = client.search_stations_around(wgs84=(127.0, 37.5), radius_m=10000)
+    stations = client.search_stations_around(
+        coordinate=PlaceCoordinate(lon=127.0, lat=37.5),
+        radius_m=10000,
+    )
 except OpinetInvalidParameterError as e:
     # radius_m > 5000 → 호출 전에 검증 실패
     print(f"파라미터 오류: {e}")
@@ -427,8 +440,8 @@ skill 파일은 다음을 정의합니다:
 
 **런타임:**
 - `requests` ≥ 2.28
-- `pyproj` ≥ 3.5
 - `pydantic` ≥ 2.0
+- `pykrtour[geo]` ≥ 0.1.0
 
 **개발:**
 - `pytest` ≥ 7.0
@@ -487,7 +500,6 @@ python -m mypy opinet
 │   ├── _convert.py      # 타입 변환 헬퍼
 │   ├── exceptions.py
 │   ├── codes.py         # enum + 시도매핑
-│   ├── coords.py
 │   ├── models.py
 │   └── experimental/    # PDF 22종 중 미검증 17종
 └── tests/
@@ -617,19 +629,20 @@ station.brand_code             # OpiNet POLL_DIV_CO/POLL_DIV_CD 원문 code
 
 ### 좌표 value object
 
-기존 호환 필드인 `station.katec_x`, `station.katec_y`, `station.lon`, `station.lat`는 그대로 유지됩니다. 새 코드에서는 `station.coordinates`를 사용하면 좌표 순서를 더 명확히 다룰 수 있습니다.
+기존 호환 필드인 `station.katec_x`, `station.katec_y`, `station.lon`, `station.lat`는 그대로 유지됩니다. 새 코드에서는 `pykrtour`의 `PlaceCoordinate`와 `KatecPoint`를 직접 사용합니다.
 
 ```python
-coords = station.coordinates
+coord = station.coordinate
+katec = station.katec_coordinate
 
-coords.katec.x, coords.katec.y      # KATEC (x, y), meters
-coords.wgs84.lon, coords.wgs84.lat  # WGS84 (lon, lat), degrees
+coord.lon, coord.lat    # WGS84 (lon, lat), degrees
+katec.x, katec.y        # KATEC (x, y), meters
 
-coords.katec.as_x_y()      # (x, y)
-coords.wgs84.as_lon_lat()  # (lon, lat)
+coord.as_lon_lat()      # (lon, lat)
+katec.as_x_y()          # (x, y)
 ```
 
-`KatecPoint`, `Wgs84Point`, `StationCoordinates`는 모두 finite float만 허용합니다. WGS84 tuple order는 항상 `(lon, lat)`입니다.
+`PlaceCoordinate`와 `KatecPoint`는 `pykrtour`가 제공합니다. WGS84 축 순서는 `PlaceCoordinate(lon=..., lat=...)`입니다.
 
 ### AreaCode helper
 
@@ -676,10 +689,10 @@ def to_station_record(station):
         "price": station.price,
         "trade_date": station.trade_date,
         "trade_time": station.trade_time,
-        "katec_x": station.coordinates.katec.x,
-        "katec_y": station.coordinates.katec.y,
-        "lon": station.coordinates.wgs84.lon,
-        "lat": station.coordinates.wgs84.lat,
+        "katec_x": station.katec_coordinate.x,
+        "katec_y": station.katec_coordinate.y,
+        "lon": station.coordinate.lon,
+        "lat": station.coordinate.lat,
         "raw": dict(station.raw),
     }
 ```
