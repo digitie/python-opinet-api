@@ -765,7 +765,7 @@ PDF 가이드북에는 무료 API 22종이 명시되어 있지만, 공식 사이
 ```python
 from kraddr.base import KatecPoint, PlaceCoordinate
 
-x, y = PlaceCoordinate(lon=127.0276, lat=37.4979).to_katec().as_x_y()
+x, y = PlaceCoordinate(lat=37.4979, lon=127.0276).to_katec().as_x_y()
 coord = PlaceCoordinate.from_katec(KatecPoint(314871.80, 544012.00))
 ```
 
@@ -1118,7 +1118,7 @@ def search_stations_around(
     Example:
         >>> client = OpinetClient(api_key="...")  # doctest: +SKIP
         >>> stations = client.search_stations_around(  # doctest: +SKIP
-        ...     coordinate=PlaceCoordinate(lon=127.0276, lat=37.4979),  # 강남역
+        ...     coordinate=PlaceCoordinate(lat=37.4979, lon=127.0276),  # 강남역
         ...     radius_m=3000,
         ...     prodcd=ProductCode.DIESEL,
         ... )
@@ -1336,7 +1336,7 @@ def test_around_all_types(client, load_fixture):
     )
 
     stations = client.search_stations_around(
-        coordinate=PlaceCoordinate(lon=127.0276, lat=37.4979),
+        coordinate=PlaceCoordinate(lat=37.4979, lon=127.0276),
         radius_m=3000,
         prodcd=ProductCode.GASOLINE,
         sort=SortOrder.PRICE,
@@ -1356,9 +1356,9 @@ def test_around_all_types(client, load_fixture):
 
 @pytest.mark.parametrize("kwargs", [
     dict(),
-    dict(coordinate=PlaceCoordinate(lon=127.0, lat=37.5), katec=KatecPoint(300000, 540000)),
-    dict(coordinate=PlaceCoordinate(lon=127.0, lat=37.5), radius_m=0),
-    dict(coordinate=PlaceCoordinate(lon=127.0, lat=37.5), radius_m=6000),
+    dict(coordinate=PlaceCoordinate(lat=37.5, lon=127.0), katec=KatecPoint(300000, 540000)),
+    dict(coordinate=PlaceCoordinate(lat=37.5, lon=127.0), radius_m=0),
+    dict(coordinate=PlaceCoordinate(lat=37.5, lon=127.0), radius_m=6000),
 ])
 def test_around_all_invalid(client, kwargs):
     with pytest.raises(OpinetInvalidParameterError):
@@ -1463,7 +1463,7 @@ from kraddr.base import KatecPoint, PlaceCoordinate
     (129.0756, 35.1796),  # 부산시청
 ])
 def test_roundtrip(lon, lat):
-    katec = PlaceCoordinate(lon=lon, lat=lat).to_katec()
+    katec = PlaceCoordinate(lat=lat, lon=lon).to_katec()
     coord = PlaceCoordinate.from_katec(katec)
     assert abs(coord.lon - lon) < 1e-5
     assert abs(coord.lat - lat) < 1e-5
@@ -1482,7 +1482,7 @@ def test_real_station_coords(katec, lon_range, lat_range):
 
 def test_invalid_input():
     with pytest.raises(ValueError):
-        PlaceCoordinate(lon=float("nan"), lat=37.5).to_katec()
+        PlaceCoordinate(lat=37.5, lon=float("nan")).to_katec()
     with pytest.raises(ValueError):
         PlaceCoordinate.from_katec(KatecPoint(float("inf"), 540000))
 ```

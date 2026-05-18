@@ -160,7 +160,7 @@ def _render_inputs(function_name: str, *, key_prefix: str) -> dict[str, Any]:
                 lon = st.number_input("lon", value=127.0276, format="%.6f", key=f"{key_prefix}:lon")
             with col2:
                 lat = st.number_input("lat", value=37.4979, format="%.6f", key=f"{key_prefix}:lat")
-            coordinate = PlaceCoordinate(lon=lon, lat=lat)
+            coordinate = PlaceCoordinate(lat=lat, lon=lon)
             katec = None
         else:
             col1, col2 = st.columns(2)
