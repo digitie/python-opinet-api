@@ -74,7 +74,7 @@ python-opinet-api/
 ├── tests/conftest.py
 ├── tests/fixtures/*.json      # captured responses (see "Initial fixtures" below)
 ├── tests/test_*.py
-└── pyproject.toml             # deps: requests, pydantic, python-kraddr-base[geo]; dev: pytest, responses, pytest-cov
+└── pyproject.toml             # deps: httpx, pydantic, python-kraddr-base[geo]; dev: pytest, respx, pytest-cov
 ```
 
 ## Type conversion policy ⭐ CRITICAL
@@ -402,7 +402,7 @@ Required fixtures:
 
 ## Testing rules
 
-- **Default tests are network-free.** Use `responses` for HTTP mocking.
+- **Default tests are network-free.** Use `respx` for httpx HTTP mocking.
 - Live tests live behind `@pytest.mark.live` and require `OPINET_API_KEY`.
 - Every endpoint needs ≥3 tests: happy path (with explicit type assertions), empty result, error response.
 - **Type assertions are mandatory** for happy-path tests. For each model field, `assert isinstance(value, ExpectedType)`. Don't just check that values are truthy.
@@ -418,9 +418,9 @@ Required fixtures:
 ### Type-assertion test pattern
 
 ```python
-def test_avg_all_price_types(client, load_fixture):
+def test_avg_all_price_types(client, load_fixture, mock_opinet):
     payload = load_fixture("avg_all_price.json")
-    responses.add(responses.GET, "...", json=payload)
+    mock_opinet.add("avgAllPrice.do", json=payload)
     rows = client.get_national_average_price()
 
     r = rows[0]
@@ -438,19 +438,22 @@ def test_avg_all_price_types(client, load_fixture):
 ## HTTP layer specifics
 
 ```python
-# _http.py — sketch
-class _OpinetHttp:
+import httpx
+
+
+# _http.py sketch
+class SyncHttpxTransport:
     BASE = "https://www.opinet.co.kr/api/"
 
     def get(self, endpoint: str, params: dict) -> dict:
         params = {**params, "certkey": self._key, "out": "json"}
         try:
             r = self._session.get(self.BASE + endpoint, params=params, timeout=self._timeout)
-        except (requests.ConnectionError, requests.Timeout) as e:
+        except (httpx.TimeoutException, httpx.TransportError) as e:
             raise OpinetNetworkError(str(e)) from e
         return self._raise_for_response(r)
 
-    def _raise_for_response(self, r: requests.Response) -> dict:
+    def _raise_for_response(self, r: httpx.Response) -> dict:
         if r.status_code in (401, 403):
             raise OpinetAuthError(f"HTTP {r.status_code}: {r.text[:200]}")
         if r.status_code == 429:
@@ -516,7 +519,7 @@ def _build_station(oil: dict) -> Station:
 ## Common pitfalls to avoid
 
 - **Don't return strings for numeric/date fields.** Always go through `_convert.py` helpers.
-- Don't pass coordinates manually as URL strings — use `requests.get(params=...)` so encoding is handled.
+- Don't pass coordinates manually as URL strings — use `httpx.get(params=...)` so encoding is handled.
 - Don't trust that `RESULT.OIL` is always a list. The API sometimes returns a single dict for one-result responses.
 - Don't trust that nested `OIL_PRICE` is always a list. It can also be a single dict.
 - Don't add LPG_YN/KPETRO_YN to the model with their literal names — use `station_type` and `is_kpetro` to avoid future readers misinterpreting.
@@ -529,7 +532,7 @@ def _build_station(oil: dict) -> Station:
 - `OilPrice` does not include `product_name`; official `OIL_PRICE` rows do not include `PRODNM`.
 - Keep fixture numeric/date/time values as strings. Turning them into JSON numbers weakens conversion tests.
 - Prefer the actual response field `POLL_DIV_CO` / `GPOLL_DIV_CO`; accept `*_CD` only as fallback.
-- Keep `types-requests` in dev dependencies so `python -m mypy src/opinet` stays green.
+- Keep sync and async httpx transports covered by unit tests; use `respx` for HTTP mocks.
 
 ## When the user asks to add a new endpoint
 

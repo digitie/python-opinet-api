@@ -4,10 +4,14 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from pathlib import Path
 from typing import Any
+from urllib.parse import parse_qs, urlparse
 
+import httpx
 import pytest
+import respx
 
 from opinet import OpinetClient
 
@@ -62,6 +66,48 @@ def load_fixture() -> Any:
 @pytest.fixture
 def client() -> OpinetClient:
     return OpinetClient(api_key="test-key", retry_backoff=0)
+
+
+class MockOpinetApi:
+    def __init__(self, router: respx.MockRouter) -> None:
+        self._router = router
+
+    @property
+    def calls(self):
+        return self._router.calls
+
+    def add(
+        self,
+        endpoint_or_url: str,
+        *,
+        json: Any | None = None,
+        body: str | bytes | Exception | None = None,
+        status: int = 200,
+        content_type: str | None = None,
+    ):
+        url = endpoint_or_url if endpoint_or_url.startswith("http") else OPINET_BASE_URL + endpoint_or_url
+        route = self._router.get(url__regex=rf"^{re.escape(url)}(?:\?.*)?$")
+        if isinstance(body, Exception):
+            return route.mock(side_effect=body)
+        headers = {"content-type": content_type} if content_type else None
+        if json is not None:
+            response = httpx.Response(status, json=json, headers=headers)
+        elif isinstance(body, bytes):
+            response = httpx.Response(status, content=body, headers=headers)
+        else:
+            response = httpx.Response(status, text=body or "", headers=headers)
+        return route.mock(return_value=response)
+
+    def reset(self) -> None:
+        self._router.reset()
+
+    def query(self, index: int = 0) -> dict[str, list[str]]:
+        return parse_qs(urlparse(str(self.calls[index].request.url)).query)
+
+
+@pytest.fixture
+def mock_opinet(respx_mock: respx.MockRouter) -> MockOpinetApi:
+    return MockOpinetApi(respx_mock)
 
 
 @pytest.fixture(scope="session")

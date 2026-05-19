@@ -831,7 +831,7 @@ class OpinetNetworkError(OpinetError):
 
 | 트리거 | 예외 |
 |---|---|
-| `requests.ConnectionError`, `Timeout` | `OpinetNetworkError` |
+| `httpx.TimeoutException`, `httpx.TransportError` | `OpinetNetworkError` |
 | HTTP 401 / 403 | `OpinetAuthError` |
 | HTTP 429 또는 본문에 `Limit`/`초과` | `OpinetRateLimitError` |
 | HTTP 5xx | `OpinetServerError` (재시도 후 최종 실패 시) |
@@ -1138,7 +1138,7 @@ def search_stations_around(
 | 계층 | 도구 | 비고 |
 |---|---|---|
 | 단위 | pytest, `unittest.mock` | 네트워크 0건 |
-| 통합 | `responses` 또는 `pytest-httpx` | fixture JSON 재생 |
+| 통합 | `respx` | fixture JSON 재생 |
 | 계약(opt-in) | `@pytest.mark.live` | 실제 API. CI에서 skip |
 | 좌표 | pytest, ±10m 허용 | 검증 기준점 |
 | 타입 변환 | pytest, parametrize | `_convert.py` 헬퍼 |
@@ -1316,7 +1316,6 @@ def test_to_bool_yn(s, expected):
 
 ```python
 # tests/test_endpoints/test_around_all.py
-import responses
 import pytest
 from datetime import date
 from opinet import OpinetClient, ProductCode, SortOrder
@@ -1324,16 +1323,10 @@ from opinet.codes import BrandCode
 from opinet.exceptions import OpinetInvalidParameterError
 
 
-@responses.activate
-def test_around_all_types(client, load_fixture):
+def test_around_all_types(client, load_fixture, mock_opinet):
     """응답 모델의 모든 필드가 Python 네이티브 타입으로 채워져야 한다."""
     payload = load_fixture("around_all_gangnam.json")
-    responses.add(
-        responses.GET,
-        "https://www.opinet.co.kr/api/aroundAll.do",
-        json=payload,
-        status=200,
-    )
+    mock_opinet.add("aroundAll.do", json=payload)
 
     stations = client.search_stations_around(
         coordinate=PlaceCoordinate(lat=37.4979, lon=127.0276),
@@ -1367,20 +1360,14 @@ def test_around_all_invalid(client, kwargs):
 
 ```python
 # tests/test_endpoints/test_detail_by_id.py
-import responses
 from datetime import date, time
 from opinet import OpinetClient
 from opinet.codes import BrandCode, ProductCode, StationType
 
 
-@responses.activate
-def test_detail_full_type_mapping(client, load_fixture):
+def test_detail_full_type_mapping(client, load_fixture, mock_opinet):
     payload = load_fixture("detail_by_id_A0010207.json")
-    responses.add(
-        responses.GET,
-        "https://www.opinet.co.kr/api/detailById.do",
-        json=payload,
-    )
+    mock_opinet.add("detailById.do", json=payload)
     detail = client.get_station_detail("A0010207")
 
     # enum 변환

@@ -1,6 +1,6 @@
 """한국 오피넷 유가 API의 비공식 Python 클라이언트."""
 
-from .client import OpinetClient
+from .client import AsyncOpinetClient, OpinetClient
 from .catalog import (
     API_CATALOG,
     SERVICE_KEY_URL,
@@ -23,6 +23,7 @@ from .codes import (
     opinet_sido_to_bjd,
     product_code_to_fuel_type,
 )
+from .config import OpinetConfig
 from .debug import (
     DebugRun,
     OpinetDebugClient,
@@ -38,6 +39,7 @@ from .debug import (
     save_fixture,
     slugify_case_name,
 )
+from .transport import AsyncHttpxTransport, SyncHttpxTransport, SyncTransport, Transport
 from .exceptions import (
     OpinetAuthError,
     OpinetError,
@@ -64,6 +66,7 @@ __all__ = [
     "ApiCatalogItem",
     "ApiParameter",
     "AvgPrice",
+    "AsyncOpinetClient",
     "BrandCode",
     "CanonicalFuelType",
     "DebugRun",
@@ -76,6 +79,7 @@ __all__ = [
     "OilPrice",
     "OpinetAuthError",
     "OpinetClient",
+    "OpinetConfig",
     "OpinetDebugClient",
     "OpinetError",
     "OpinetInvalidParameterError",
@@ -89,6 +93,10 @@ __all__ = [
     "Station",
     "StationDetail",
     "StationType",
+    "AsyncHttpxTransport",
+    "SyncHttpxTransport",
+    "SyncTransport",
+    "Transport",
     "assert_case",
     "bjd_sido_to_opinet",
     "build_fixture",

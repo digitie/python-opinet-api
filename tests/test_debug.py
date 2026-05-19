@@ -7,7 +7,6 @@ from datetime import date
 from pathlib import Path
 
 import pytest
-import responses
 from kraddr.base import KatecPoint, PlaceCoordinate
 
 from opinet import OpinetClient, ProductCode
@@ -29,9 +28,8 @@ from opinet.exceptions import OpinetAuthError, OpinetInvalidParameterError
 OPINET_BASE_URL = "https://www.opinet.co.kr/api/"
 
 
-@responses.activate
-def test_debug_client_collects_area_code_run(load_fixture) -> None:
-    responses.add(responses.GET, OPINET_BASE_URL + "areaCode.do", json=load_fixture("area_code_root.json"))
+def test_debug_client_collects_area_code_run(load_fixture, mock_opinet) -> None:
+    mock_opinet.add("areaCode.do", json=load_fixture("area_code_root.json"))
 
     run = OpinetClient("secret-key", retry_backoff=0).debug().get_area_codes()
 
@@ -51,9 +49,8 @@ def test_debug_client_collects_area_code_run(load_fixture) -> None:
     assert "parsed response" in " ".join(run.trace)
 
 
-@responses.activate
-def test_debug_fixture_save_masks_and_blocks_overwrite(load_fixture, tmp_path: Path) -> None:
-    responses.add(responses.GET, OPINET_BASE_URL + "lowTop10.do", json=load_fixture("low_top10_B027.json"))
+def test_debug_fixture_save_masks_and_blocks_overwrite(load_fixture, tmp_path: Path, mock_opinet) -> None:
+    mock_opinet.add("lowTop10.do", json=load_fixture("low_top10_B027.json"))
     run = OpinetClient("secret-key", retry_backoff=0).debug().get_lowest_price_top20(
         ProductCode.GASOLINE,
         cnt=2,
@@ -202,12 +199,11 @@ def test_parse_and_process_all_debug_response_shapes(load_fixture) -> None:
         process_debug_result("unknown", [])
 
 
-@responses.activate
-def test_debug_client_runs_avg_around_and_detail(load_fixture) -> None:
+def test_debug_client_runs_avg_around_and_detail(load_fixture, mock_opinet) -> None:
     client = OpinetClient("secret-key", retry_backoff=0)
-    responses.add(responses.GET, OPINET_BASE_URL + "avgAllPrice.do", json=load_fixture("avg_all_price.json"))
-    responses.add(responses.GET, OPINET_BASE_URL + "aroundAll.do", json=load_fixture("around_all_gangnam.json"))
-    responses.add(responses.GET, OPINET_BASE_URL + "detailById.do", json=load_fixture("detail_by_id_A0010207.json"))
+    mock_opinet.add("avgAllPrice.do", json=load_fixture("avg_all_price.json"))
+    mock_opinet.add("aroundAll.do", json=load_fixture("around_all_gangnam.json"))
+    mock_opinet.add("detailById.do", json=load_fixture("detail_by_id_A0010207.json"))
 
     avg_run = client.debug().get_national_average_price()
     around_run = client.debug().search_stations_around(

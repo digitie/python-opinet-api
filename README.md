@@ -116,6 +116,25 @@ for area in client.get_area_codes():
     print(f"{area.code}: {area.name}")  # "01: 서울"
 ```
 
+### Async / httpx client
+
+`OpinetClient`는 `httpx.Client` 기반의 동기 facade이고, `OpinetClient.aio()`는 `python-krheritage-api`와 같은 형태로 `AsyncOpinetClient`를 반환합니다. 두 클라이언트는 동일한 모델과 `python-krtour-map` 호환 normalized 계약을 유지합니다.
+
+```python
+import asyncio
+from opinet import OpinetClient, ProductCode
+
+
+async def main() -> None:
+    async with OpinetClient.aio() as client:
+        rows = await client.get_lowest_price_top20(ProductCode.GASOLINE, cnt=5, area="01")
+        for row in rows:
+            print(row.provider_station_id, row.name, row.price)
+
+
+asyncio.run(main())
+```
+
 ---
 
 ## 응답 데이터의 Python 타입 ⭐
@@ -403,7 +422,7 @@ detail.is_kpetro          # KPETRO_YN을 매핑한 별도 boolean (품질인증 
 - `POLL_DIV_CO`를 우선하고, 없을 때만 문서 표기의 `POLL_DIV_CD`를 fallback으로 봅니다.
 - `GPOLL_DIV_CO=" "` 같은 공백은 `None`으로 정규화합니다.
 - 좌표 범위 테스트는 주소 권역 확인용입니다. 실제 변환값의 소수점 하한을 임의로 좁히지 않습니다.
-- `requests` 타입 검사를 위해 개발 의존성에는 `types-requests`를 포함합니다.
+- HTTP transport는 `httpx`를 사용하며, sync client와 async client가 같은 파서/모델 계약을 공유합니다.
 
 ---
 
@@ -472,7 +491,7 @@ skill 파일은 다음을 정의합니다:
 ## 의존성
 
 **런타임:**
-- `requests` ≥ 2.28
+- `httpx` ≥ 0.27
 - `pydantic` ≥ 2.0
 - `python-kraddr-base[geo]` ≥ 0.1.5
 
@@ -481,10 +500,9 @@ skill 파일은 다음을 정의합니다:
 
 **개발:**
 - `pytest` ≥ 7.0
-- `responses` ≥ 0.23 (HTTP mocking)
+- `respx` ≥ 0.21 (httpx HTTP mocking)
 - `pytest-cov`
 - `mypy` (선택)
-- `types-requests` (mypy용)
 
 Python 3.11 이상 (`StrEnum`, `slots=True` 사용).
 
@@ -499,7 +517,7 @@ python -m pytest --cov=opinet --cov-fail-under=90
 python -m mypy src/opinet
 ```
 
-기본 테스트는 네트워크를 사용하지 않고 `responses`로 HTTP 응답을 재생합니다. 실제 API 호출 테스트를 추가할 때는 `@pytest.mark.live`로 분리하고 `--run-live`와 `OPINET_API_KEY`를 요구하세요.
+기본 테스트는 네트워크를 사용하지 않고 `respx`로 `httpx` 응답을 재생합니다. 실제 API 호출 테스트를 추가할 때는 `@pytest.mark.live`로 분리하고 `--run-live`와 `OPINET_API_KEY`를 요구하세요.
 라이브 테스트는 `.env` 또는 환경변수의 `OPINET_API_KEY`를 읽지만, 키는 `.gitignore`로 보호되는 로컬 파일에만 둡니다.
 키가 공식 open API 게이트웨이에 아직 provision되지 않은 경우 서버가 HTTP 200과 빈 `RESULT.OIL`을 줄 수 있으며, 이때 live 파싱 smoke는 skip됩니다.
 

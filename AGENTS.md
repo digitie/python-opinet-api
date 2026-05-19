@@ -19,7 +19,7 @@
 - 저장소의 1차 범위는 공식 오픈 API 페이지에 등재된 5개 엔드포인트 구현이다.
 - PDF 가이드북의 추가 API는 검증 전까지 `opinet.experimental`에 둔다.
 - Python 3.11 이상을 기준으로 하며 `dataclass(frozen=True, slots=True)`와 `StrEnum`을 사용한다.
-- 런타임 의존성은 `requests`, `pydantic`, `python-kraddr-base[geo]`이고 테스트는 `pytest`, `responses`, `pytest-cov`를 기준으로 한다.
+- 런타임 의존성은 `httpx`, `pydantic`, `python-kraddr-base[geo]`이고 테스트는 `pytest`, `respx`, `pytest-cov`를 기준으로 한다.
 - 라이선스는 루트 `LICENSE`를 따른다.
 
 ## Provider API 사용 원칙
@@ -90,7 +90,7 @@
 - 커버리지 목표: `pytest --cov=opinet --cov-fail-under=90`
 - 타입 검사: `python -m mypy src/opinet`
 - 실제 API 스모크: `pytest -m live --run-live` (`OPINET_API_KEY` 필요)
-- HTTP mocking 테스트는 `responses`를 사용한다.
+- HTTP mocking 테스트는 `respx`로 `httpx` 호출을 재생한다.
 - 좌표 변환 자체는 `kraddr.base` 테스트에서 검증하고, `python-opinet-api`에서는 요청/응답 모델 경계가 `PlaceCoordinate`와 `KatecPoint`를 직접 쓰는지 검증한다.
 - 타입 변환 테스트는 정상값, 빈 문자열/공백/None, 잘못된 포맷을 모두 포함한다.
 
@@ -102,7 +102,7 @@
 - `POLL_DIV_CO`/`GPOLL_DIV_CO`가 실제 응답 우선 필드다. 문서 표기의 `*_CD`는 fallback으로만 사용한다.
 - 공백 1자(`" "`)는 값이 아니다. `strip_or_none()`으로 `None` 처리한다.
 - `SIGUNCD`는 오피넷 4자리 시군구 코드이며 법정동 5자리 시군구 코드나 10자리 법정동코드와 일치한다고 가정하지 않는다.
-- 개발 의존성에서 `types-requests`를 빼면 `mypy opinet`이 스텁 부재로 실패한다.
+- HTTP transport는 `httpx` 기반이며 sync/async transport 타입을 함께 유지한다.
 
 ## 에이전트 메모
 - 이 저장소는 명세 문서와 공식 5개 엔드포인트의 초기 구현이 함께 있는 상태다.

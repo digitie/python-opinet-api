@@ -1,7 +1,6 @@
 from datetime import date, time
 
 import pytest
-import responses
 from kraddr.base import PlaceCoordinate
 
 from opinet import (
@@ -12,9 +11,6 @@ from opinet import (
     product_code_to_fuel_type,
 )
 from opinet.exceptions import OpinetInvalidParameterError
-
-OPINET_BASE_URL = "https://www.opinet.co.kr/api/"
-
 
 @pytest.mark.parametrize(
     ("product_code", "fuel_type"),
@@ -64,9 +60,8 @@ def test_area_code_invalid_level_raises(code):
         _ = area.code_level
 
 
-@responses.activate
-def test_avg_price_normalized_fields_and_raw(client, load_fixture):
-    responses.add(responses.GET, OPINET_BASE_URL + "avgAllPrice.do", json=load_fixture("avg_all_price.json"))
+def test_avg_price_normalized_fields_and_raw(client, load_fixture, mock_opinet):
+    mock_opinet.add("avgAllPrice.do", json=load_fixture("avg_all_price.json"))
 
     rows = client.get_national_average_price()
     premium = rows[0]
@@ -80,9 +75,8 @@ def test_avg_price_normalized_fields_and_raw(client, load_fixture):
         premium.raw["PRICE"] = "0"
 
 
-@responses.activate
-def test_station_request_product_context_coordinates_and_raw(client, load_fixture):
-    responses.add(responses.GET, OPINET_BASE_URL + "lowTop10.do", json=load_fixture("low_top10_B027.json"))
+def test_station_request_product_context_coordinates_and_raw(client, load_fixture, mock_opinet):
+    mock_opinet.add("lowTop10.do", json=load_fixture("low_top10_B027.json"))
 
     stations = client.get_lowest_price_top20(ProductCode.GASOLINE, cnt=2, area="01")
     station = stations[0]
@@ -103,13 +97,8 @@ def test_station_request_product_context_coordinates_and_raw(client, load_fixtur
         station.raw["PRICE"] = "0"
 
 
-@responses.activate
-def test_station_response_product_and_trade_context_prefer_response(client, load_fixture):
-    responses.add(
-        responses.GET,
-        OPINET_BASE_URL + "lowTop10.do",
-        json=load_fixture("low_top10_with_trade_context.json"),
-    )
+def test_station_response_product_and_trade_context_prefer_response(client, load_fixture, mock_opinet):
+    mock_opinet.add("lowTop10.do", json=load_fixture("low_top10_with_trade_context.json"))
 
     stations = client.get_lowest_price_top20(ProductCode.GASOLINE, cnt=1)
     station = stations[0]
@@ -125,9 +114,8 @@ def test_station_response_product_and_trade_context_prefer_response(client, load
     assert station.raw["TRADE_TM"] == "145618"
 
 
-@responses.activate
-def test_around_station_request_product_context(client, load_fixture):
-    responses.add(responses.GET, OPINET_BASE_URL + "aroundAll.do", json=load_fixture("around_all_gangnam.json"))
+def test_around_station_request_product_context(client, load_fixture, mock_opinet):
+    mock_opinet.add("aroundAll.do", json=load_fixture("around_all_gangnam.json"))
 
     stations = client.search_stations_around(
         coordinate=PlaceCoordinate(lat=37.4979, lon=127.0276),
@@ -139,9 +127,8 @@ def test_around_station_request_product_context(client, load_fixture):
     assert stations[0].fuel_type is FuelType.DIESEL
 
 
-@responses.activate
-def test_station_detail_and_oil_price_raw_preserve_nested_strings(client, load_fixture):
-    responses.add(responses.GET, OPINET_BASE_URL + "detailById.do", json=load_fixture("detail_by_id_A0010207.json"))
+def test_station_detail_and_oil_price_raw_preserve_nested_strings(client, load_fixture, mock_opinet):
+    mock_opinet.add("detailById.do", json=load_fixture("detail_by_id_A0010207.json"))
 
     detail = client.get_station_detail("A0010207")
     first_price = detail.prices[0]

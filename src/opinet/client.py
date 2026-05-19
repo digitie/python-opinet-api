@@ -10,7 +10,8 @@ from typing import TYPE_CHECKING, Any
 from kraddr.base import KatecPoint, PlaceCoordinate
 
 from ._convert import strip_or_none, to_bool_yn, to_date, to_float_or_none, to_time
-from ._http import _OpinetHttp
+from ._http import _AsyncOpinetHttp, _OpinetHttp
+from .config import OpinetConfig
 from .codes import BrandCode, ProductCode, SortOrder, StationType, opinet_sido_to_bjd
 from .exceptions import OpinetAuthError, OpinetInvalidParameterError, OpinetNoDataError, OpinetServerError
 from .models import AreaCode, AvgPrice, OilPrice, Station, StationDetail
@@ -188,29 +189,67 @@ class OpinetClient:
         retry_backoff: float = 0.5,
         session: Any | None = None,
     ) -> None:
-        self.api_key = (
-            _normalize_api_key(api_key)
-            or _normalize_api_key(os.getenv("OPINET_API_KEY"))
-            or _load_default_api_key_from_env_file()
+        self.config = OpinetConfig.from_env(
+            api_key=api_key,
+            timeout=timeout,
+            strict_empty=strict_empty,
+            max_retries=max_retries,
+            retry_backoff=retry_backoff,
         )
-        self.timeout = timeout
-        self.strict_empty = strict_empty
-        self._http = (
+        self.api_key = self.config.api_key
+        self.timeout = self.config.timeout
+        self.strict_empty = self.config.strict_empty
+        self._transport = (
             _OpinetHttp(
                 self.api_key,
-                timeout=timeout,
-                max_retries=max_retries,
-                retry_backoff=retry_backoff,
+                timeout=self.config.timeout,
+                max_retries=self.config.max_retries,
+                retry_backoff=self.config.retry_backoff,
                 session=session,
             )
             if self.api_key
             else None
         )
+        self._http = self._transport
+        self.closed = False
 
     def _require_http(self) -> _OpinetHttp:
         if self._http is None:
             raise OpinetAuthError("OPINET_API_KEY is not set and api_key was not provided")
         return self._http
+
+    @classmethod
+    def aio(
+        cls,
+        *,
+        api_key: str | None = None,
+        timeout: float = 10.0,
+        strict_empty: bool = False,
+        max_retries: int = 2,
+        retry_backoff: float = 0.5,
+        session: Any | None = None,
+    ) -> "AsyncOpinetClient":
+        """Build an asyncio-friendly client backed by ``httpx.AsyncClient``."""
+        return AsyncOpinetClient(
+            api_key=api_key,
+            timeout=timeout,
+            strict_empty=strict_empty,
+            max_retries=max_retries,
+            retry_backoff=retry_backoff,
+            session=session,
+        )
+
+    def close(self) -> None:
+        """Close the underlying ``httpx.Client`` when this client owns one."""
+        if self._http is not None:
+            self._http.close()
+        self.closed = True
+
+    def __enter__(self) -> "OpinetClient":
+        return self
+
+    def __exit__(self, exc_type: Any, exc: Any, traceback: Any) -> None:
+        self.close()
 
     def debug(self) -> OpinetDebugClient:
         """디버그 실행과 fixture 저장을 돕는 별도 헬퍼를 반환한다."""
@@ -320,7 +359,7 @@ class OpinetClient:
         katec: KatecPoint | None = None,
         radius_m: int = 5000,
         prodcd: ProductCode | str = ProductCode.GASOLINE,
-        sort: SortOrder = SortOrder.PRICE,
+        sort: SortOrder | str = SortOrder.PRICE,
     ) -> list[Station]:
         """주어진 좌표 반경 내 주유소를 검색한다.
 
@@ -481,3 +520,152 @@ class OpinetClient:
             )
         except (ValueError, KeyError) as exc:
             raise _parse_error(endpoint, exc) from exc
+
+
+class AsyncOpinetClient:
+    """Asyncio-friendly Opinet client backed by ``httpx.AsyncClient``."""
+
+    def __init__(
+        self,
+        api_key: str | None = None,
+        *,
+        timeout: float = 10.0,
+        strict_empty: bool = False,
+        max_retries: int = 2,
+        retry_backoff: float = 0.5,
+        session: Any | None = None,
+    ) -> None:
+        self.config = OpinetConfig.from_env(
+            api_key=api_key,
+            timeout=timeout,
+            strict_empty=strict_empty,
+            max_retries=max_retries,
+            retry_backoff=retry_backoff,
+        )
+        self.api_key = self.config.api_key
+        self.timeout = self.config.timeout
+        self.strict_empty = self.config.strict_empty
+        self._transport = (
+            _AsyncOpinetHttp(
+                self.api_key,
+                timeout=self.config.timeout,
+                max_retries=self.config.max_retries,
+                retry_backoff=self.config.retry_backoff,
+                session=session,
+            )
+            if self.api_key
+            else None
+        )
+        self._http = self._transport
+        self.closed = False
+        self._parser: OpinetClient = OpinetClient.__new__(OpinetClient)
+        self._parser.strict_empty = self.strict_empty
+
+    def _require_http(self) -> _AsyncOpinetHttp:
+        if self._http is None:
+            raise OpinetAuthError("OPINET_API_KEY is not set and api_key was not provided")
+        return self._http
+
+    async def aclose(self) -> None:
+        if self._http is not None:
+            await self._http.aclose()
+        self.closed = True
+
+    async def __aenter__(self) -> "AsyncOpinetClient":
+        return self
+
+    async def __aexit__(self, exc_type: Any, exc: Any, traceback: Any) -> None:
+        await self.aclose()
+
+    def close(self) -> None:
+        raise TypeError("AsyncOpinetClient.close() is not supported; use await aclose()")
+
+    def debug(self) -> OpinetDebugClient:
+        raise TypeError("AsyncOpinetClient does not support the sync debug helper")
+
+    async def get_national_average_price(self) -> list[AvgPrice]:
+        endpoint = "avgAllPrice.do"
+        parsed = self._parser._parse_national_average_price_response(await self._require_http().get(endpoint))
+        self._parser._handle_empty(parsed, endpoint)
+        return parsed
+
+    async def get_lowest_price_top20(
+        self,
+        prodcd: ProductCode | str,
+        cnt: int = 10,
+        area: str | None = None,
+    ) -> list[Station]:
+        if not 1 <= cnt <= 20:
+            raise OpinetInvalidParameterError("cnt must be between 1 and 20")
+        if area is not None:
+            _validate_area_param(area)
+        endpoint = "lowTop10.do"
+        product_code = _coerce_product_code(prodcd)
+        params: dict[str, Any] = {"prodcd": product_code.value, "cnt": cnt}
+        if area is not None:
+            params["area"] = area
+        parsed = self._parser._parse_station_list_response(
+            await self._require_http().get(endpoint, params=params),
+            endpoint,
+            request_product_code=product_code,
+        )
+        self._parser._handle_empty(parsed, endpoint)
+        return parsed
+
+    async def search_stations_around(
+        self,
+        *,
+        coordinate: PlaceCoordinate | None = None,
+        katec: KatecPoint | None = None,
+        radius_m: int = 5000,
+        prodcd: ProductCode | str = ProductCode.GASOLINE,
+        sort: SortOrder | str = SortOrder.PRICE,
+    ) -> list[Station]:
+        if (coordinate is None) == (katec is None):
+            raise OpinetInvalidParameterError("pass exactly one of coordinate or katec")
+        if not 1 <= radius_m <= 5000:
+            raise OpinetInvalidParameterError("radius_m must be between 1 and 5000")
+        if coordinate is not None:
+            x, y = coordinate.to_katec().as_x_y()
+        else:
+            assert katec is not None
+            x, y = katec.as_x_y()
+
+        product_code = _coerce_product_code(prodcd)
+        sort_order = _coerce_sort_order(sort)
+        endpoint = "aroundAll.do"
+        parsed = self._parser._parse_station_list_response(
+            await self._require_http().get(
+                endpoint,
+                params={
+                    "x": x,
+                    "y": y,
+                    "radius": radius_m,
+                    "prodcd": product_code.value,
+                    "sort": sort_order.value,
+                },
+            ),
+            endpoint,
+            request_product_code=product_code,
+        )
+        self._parser._handle_empty(parsed, endpoint)
+        return parsed
+
+    async def get_station_detail(self, uni_id: str) -> StationDetail:
+        if not uni_id:
+            raise OpinetInvalidParameterError("uni_id must not be empty")
+        endpoint = "detailById.do"
+        return self._parser._parse_station_detail_response(
+            await self._require_http().get(endpoint, params={"id": uni_id})
+        )
+
+    async def get_area_codes(self, sido: str | None = None) -> list[AreaCode]:
+        if sido is not None and (len(sido) != 2 or not sido.isdigit()):
+            raise OpinetInvalidParameterError("sido must be a 2-digit code")
+        if sido is not None:
+            opinet_sido_to_bjd(sido)
+        endpoint = "areaCode.do"
+        params = {"area": sido} if sido is not None else None
+        parsed = self._parser._parse_area_codes_response(await self._require_http().get(endpoint, params=params))
+        self._parser._handle_empty(parsed, endpoint)
+        return parsed
