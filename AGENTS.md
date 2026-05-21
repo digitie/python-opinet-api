@@ -1,5 +1,9 @@
 # AGENTS.md
 
+## 문서 언어 정책
+
+이 저장소의 모든 Markdown/RST 문서는 한글로 작성합니다. 공식 API 필드명, 코드 식별자, 명령어, URL, provider 원문처럼 그대로 보존해야 하는 값만 영어를 유지합니다. 새 문서나 기존 문서를 수정할 때도 이 규칙을 우선합니다.
+
 ## 역할
 - 이 파일은 Codex/agent가 python-opinet-api 작업 전에 읽는 최소 지침이다.
 - 상세 API 명세와 구현 규칙은 작업 주제에 맞춰 `opinet-api.md`와 `SKILL.md`를 추가로 읽는다.
