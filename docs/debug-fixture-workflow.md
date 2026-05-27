@@ -30,7 +30,6 @@
 지원 function 이름은 현재 공식 5개 메서드와 같습니다.
 
 ```python
-from kraddr.base import PlaceCoordinate
 from opinet import OpinetClient, ProductCode, get_api_catalog_options
 from opinet.debug import save_debug_fixture
 
@@ -39,7 +38,8 @@ catalog_options = get_api_catalog_options()
 
 client = OpinetClient(api_key="...")
 run = client.debug().search_stations_around(
-    coordinate=PlaceCoordinate(lat=37.4979, lon=127.0276),
+    lon=127.0276,
+    lat=37.4979,
     radius_m=3000,
     prodcd=ProductCode.GASOLINE,
 )

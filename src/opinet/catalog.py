@@ -101,16 +101,28 @@ API_CATALOG: tuple[ApiCatalogItem, ...] = (
         response_model="list[Station]",
         parameters=(
             ApiParameter(
-                name="coordinate",
-                label="WGS84 좌표",
+                name="lon",
+                label="WGS84 경도",
                 required=False,
-                description="kraddr.base.PlaceCoordinate. katec과 둘 중 하나만 지정",
+                description="lat과 함께 지정. KATEC 좌표와 둘 중 하나만 지정",
             ),
             ApiParameter(
-                name="katec",
+                name="lat",
+                label="WGS84 위도",
+                required=False,
+                description="lon과 함께 지정. KATEC 좌표와 둘 중 하나만 지정",
+            ),
+            ApiParameter(
+                name="katec_x",
                 label="KATEC 좌표",
                 required=False,
-                description="kraddr.base.KatecPoint. coordinate와 둘 중 하나만 지정",
+                description="katec_y와 함께 지정. WGS84 좌표와 둘 중 하나만 지정",
+            ),
+            ApiParameter(
+                name="katec_y",
+                label="KATEC 좌표",
+                required=False,
+                description="katec_x와 함께 지정. WGS84 좌표와 둘 중 하나만 지정",
             ),
             ApiParameter(
                 name="radius_m",

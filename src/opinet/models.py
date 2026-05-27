@@ -9,8 +9,6 @@ from types import MappingProxyType
 from typing import TYPE_CHECKING, Any, Literal, Mapping
 from zoneinfo import ZoneInfo
 
-from kraddr.base import KatecPoint, PlaceCoordinate
-
 from .codes import BrandCode, FuelType, ProductCode, StationType, opinet_sido_to_bjd, product_code_to_fuel_type
 from .exceptions import OpinetInvalidParameterError
 
@@ -170,12 +168,16 @@ class Station:
         )
 
     @property
-    def coordinate(self) -> PlaceCoordinate:
-        return PlaceCoordinate(lat=self.lat, lon=self.lon)
+    def lon_lat(self) -> tuple[float, float]:
+        """WGS84 `(lon, lat)` 좌표 쌍을 반환한다."""
+
+        return self.lon, self.lat
 
     @property
-    def katec_coordinate(self) -> KatecPoint:
-        return KatecPoint(self.katec_x, self.katec_y)
+    def katec_xy(self) -> tuple[float, float]:
+        """오피넷 KATEC `(x, y)` 좌표 쌍을 반환한다."""
+
+        return self.katec_x, self.katec_y
 
     def trade_datetime(self, tz: str | tzinfo = "Asia/Seoul") -> datetime | None:
         """거래 날짜와 시간이 모두 있으면 시간대 정보가 포함된 datetime을 반환한다."""
@@ -252,12 +254,16 @@ class StationDetail:
         )
 
     @property
-    def coordinate(self) -> PlaceCoordinate:
-        return PlaceCoordinate(lat=self.lat, lon=self.lon)
+    def lon_lat(self) -> tuple[float, float]:
+        """WGS84 `(lon, lat)` 좌표 쌍을 반환한다."""
+
+        return self.lon, self.lat
 
     @property
-    def katec_coordinate(self) -> KatecPoint:
-        return KatecPoint(self.katec_x, self.katec_y)
+    def katec_xy(self) -> tuple[float, float]:
+        """오피넷 KATEC `(x, y)` 좌표 쌍을 반환한다."""
+
+        return self.katec_x, self.katec_y
 
     def to_normalized(self, *, endpoint: str = "detailById.do") -> NormalizedFuelStationDetail:
         """애플리케이션용 정규화 주유소 상세 레코드를 반환한다."""

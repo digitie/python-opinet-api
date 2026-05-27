@@ -3,7 +3,6 @@ from __future__ import annotations
 from typing import Any
 
 import pytest
-from kraddr.base import AddressRegion
 
 from opinet.exceptions import OpinetInvalidParameterError, OpinetNoDataError
 from opinet.models import AreaCode
@@ -63,12 +62,10 @@ def test_resolve_sigungu_bjd_code_with_full_vworld_title() -> None:
     assert isinstance(mapping, OpinetSigunguBjdMapping)
     assert mapping.opinet_sigungu_code == "0113"
     assert mapping.opinet_sigungu_name == "강남구"
-    assert isinstance(mapping.bjd_region, AddressRegion)
-    assert mapping.bjd_region.sigungu_code_value == "11680"
-    assert mapping.bjd_region.legal_dong_code is None
-    assert mapping.bjd_region.administrative_label == "서울특별시 강남구"
     assert mapping.bjd_sigungu_code == "11680"
     assert mapping.bjd_sido_code == "11"
+    assert mapping.bjd_sido_name == "서울특별시"
+    assert mapping.bjd_sigungu_name == "강남구"
     assert mapping.vworld_query == "서울특별시 강남구"
     assert vworld.calls == [("서울특별시 강남구", "L2", 10)]
 

@@ -7,12 +7,11 @@ from datetime import date, time
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from kraddr.base import KatecPoint, PlaceCoordinate
-
 from ._convert import strip_or_none, to_bool_yn, to_date, to_float_or_none, to_time
 from ._http import _AsyncOpinetHttp, _OpinetHttp
 from .config import OpinetConfig
 from .codes import BrandCode, ProductCode, SortOrder, StationType, opinet_sido_to_bjd
+from .coords import katec_to_wgs84, validate_katec_xy, wgs84_to_katec
 from .exceptions import OpinetAuthError, OpinetInvalidParameterError, OpinetNoDataError, OpinetServerError
 from .models import AreaCode, AvgPrice, OilPrice, Station, StationDetail
 
@@ -168,12 +167,34 @@ def _station_type(value: Any) -> StationType:
     return StationType(text)
 
 
-def _katec_to_place_coordinate(katec_x: float, katec_y: float) -> PlaceCoordinate:
-    return PlaceCoordinate.from_katec(KatecPoint(katec_x, katec_y))
-
-
 def _parse_error(endpoint: str, exc: Exception) -> OpinetServerError:
     return OpinetServerError(f"{endpoint}: failed to parse response record: {exc}")
+
+
+def _coordinate_query_params(
+    *,
+    lon: float | None,
+    lat: float | None,
+    katec_x: float | None,
+    katec_y: float | None,
+) -> tuple[float, float]:
+    has_wgs84 = lon is not None or lat is not None
+    has_katec = katec_x is not None or katec_y is not None
+    if has_wgs84 == has_katec:
+        raise OpinetInvalidParameterError("pass exactly one of lon/lat or katec_x/katec_y")
+    if has_wgs84:
+        if lon is None or lat is None:
+            raise OpinetInvalidParameterError("lon and lat must be passed together")
+        try:
+            return wgs84_to_katec(lon, lat)
+        except ValueError as exc:
+            raise OpinetInvalidParameterError(str(exc)) from exc
+    if katec_x is None or katec_y is None:
+        raise OpinetInvalidParameterError("katec_x and katec_y must be passed together")
+    try:
+        return validate_katec_xy(katec_x, katec_y)
+    except ValueError as exc:
+        raise OpinetInvalidParameterError(str(exc)) from exc
 
 
 class OpinetClient:
@@ -355,27 +376,22 @@ class OpinetClient:
     def search_stations_around(
         self,
         *,
-        coordinate: PlaceCoordinate | None = None,
-        katec: KatecPoint | None = None,
+        lon: float | None = None,
+        lat: float | None = None,
+        katec_x: float | None = None,
+        katec_y: float | None = None,
         radius_m: int = 5000,
         prodcd: ProductCode | str = ProductCode.GASOLINE,
         sort: SortOrder | str = SortOrder.PRICE,
     ) -> list[Station]:
         """주어진 좌표 반경 내 주유소를 검색한다.
 
-        ``aroundAll.do``(apiId=3)를 호출한다. 공개 입력은
-        ``kraddr.base.PlaceCoordinate`` 또는 ``kraddr.base.KatecPoint``만 받으며,
-        응답 모델에는 ``coordinate``와 KATEC 원본 좌표가 모두 들어간다.
+        ``aroundAll.do``(apiId=3)를 호출한다. 공개 입력은 WGS84 ``lon``/``lat``
+        또는 오피넷 KATEC ``katec_x``/``katec_y`` 쌍 중 하나만 받는다.
         """
-        if (coordinate is None) == (katec is None):
-            raise OpinetInvalidParameterError("pass exactly one of coordinate or katec")
         if not 1 <= radius_m <= 5000:
             raise OpinetInvalidParameterError("radius_m must be between 1 and 5000")
-        if coordinate is not None:
-            x, y = coordinate.to_katec().as_x_y()
-        else:
-            assert katec is not None
-            x, y = katec.as_x_y()
+        x, y = _coordinate_query_params(lon=lon, lat=lat, katec_x=katec_x, katec_y=katec_y)
 
         product_code = _coerce_product_code(prodcd)
         sort_order = _coerce_sort_order(sort)
@@ -450,7 +466,7 @@ class OpinetClient:
         try:
             katec_x = _require_float(row.get("GIS_X_COOR"), "GIS_X_COOR", endpoint)
             katec_y = _require_float(row.get("GIS_Y_COOR"), "GIS_Y_COOR", endpoint)
-            coordinate = _katec_to_place_coordinate(katec_x, katec_y)
+            lon, lat = katec_to_wgs84(katec_x, katec_y)
             product_code = _optional_product_code(row.get("PRODCD")) or request_product_code
             return Station(
                 uni_id=str(row["UNI_ID"]),
@@ -461,8 +477,8 @@ class OpinetClient:
                 address_road=strip_or_none(row.get("NEW_ADR")),
                 katec_x=katec_x,
                 katec_y=katec_y,
-                lon=coordinate.lon,
-                lat=coordinate.lat,
+                lon=lon,
+                lat=lat,
                 distance_m=to_float_or_none(row.get("DISTANCE")),
                 product_code=product_code,
                 product_name=strip_or_none(row.get("PRODNM")),
@@ -477,7 +493,7 @@ class OpinetClient:
         try:
             katec_x = _require_float(row.get("GIS_X_COOR"), "GIS_X_COOR", endpoint)
             katec_y = _require_float(row.get("GIS_Y_COOR"), "GIS_Y_COOR", endpoint)
-            coordinate = _katec_to_place_coordinate(katec_x, katec_y)
+            lon, lat = katec_to_wgs84(katec_x, katec_y)
             prices = tuple(
                 self._build_oil_price(item, endpoint)
                 for item in _normalize_items(row.get("OIL_PRICE"), "OIL_PRICE", endpoint)
@@ -497,8 +513,8 @@ class OpinetClient:
                 tel=strip_or_none(row.get("TEL")),
                 katec_x=katec_x,
                 katec_y=katec_y,
-                lon=coordinate.lon,
-                lat=coordinate.lat,
+                lon=lon,
+                lat=lat,
                 has_maintenance=to_bool_yn(row.get("MAINT_YN")),
                 has_carwash=to_bool_yn(row.get("CAR_WASH_YN")),
                 has_cvs=to_bool_yn(row.get("CVS_YN")),
@@ -615,21 +631,17 @@ class AsyncOpinetClient:
     async def search_stations_around(
         self,
         *,
-        coordinate: PlaceCoordinate | None = None,
-        katec: KatecPoint | None = None,
+        lon: float | None = None,
+        lat: float | None = None,
+        katec_x: float | None = None,
+        katec_y: float | None = None,
         radius_m: int = 5000,
         prodcd: ProductCode | str = ProductCode.GASOLINE,
         sort: SortOrder | str = SortOrder.PRICE,
     ) -> list[Station]:
-        if (coordinate is None) == (katec is None):
-            raise OpinetInvalidParameterError("pass exactly one of coordinate or katec")
         if not 1 <= radius_m <= 5000:
             raise OpinetInvalidParameterError("radius_m must be between 1 and 5000")
-        if coordinate is not None:
-            x, y = coordinate.to_katec().as_x_y()
-        else:
-            assert katec is not None
-            x, y = katec.as_x_y()
+        x, y = _coordinate_query_params(lon=lon, lat=lat, katec_x=katec_x, katec_y=katec_y)
 
         product_code = _coerce_product_code(prodcd)
         sort_order = _coerce_sort_order(sort)

@@ -7,8 +7,6 @@ from dataclasses import dataclass, field
 from types import MappingProxyType
 from typing import Any, Protocol
 
-from kraddr.base import AddressRegion
-
 from .codes import BJD_LEGACY_TO_NEW, opinet_sido_to_bjd
 from .exceptions import OpinetInvalidParameterError, OpinetNoDataError, OpinetServerError
 from .models import AreaCode
@@ -57,33 +55,20 @@ class OpinetSigunguBjdMapping:
     opinet_sigungu_name: str
     opinet_sido_code: str
     opinet_sido_name: str
-    bjd_region: AddressRegion
+    bjd_sigungu_code: str
+    bjd_sido_code: str
+    bjd_sido_name: str
+    bjd_sigungu_name: str
     vworld_title: str
     vworld_query: str
     raw: Mapping[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
-        if self.bjd_region.sigungu_code_value is None:
-            raise ValueError("bjd_region must contain a sigungu code")
+        if len(self.bjd_sigungu_code) != 5 or not self.bjd_sigungu_code.isdigit():
+            raise ValueError("bjd_sigungu_code must be a 5-digit code")
+        if self.bjd_sido_code != self.bjd_sigungu_code[:2]:
+            raise ValueError("bjd_sido_code must match bjd_sigungu_code prefix")
         object.__setattr__(self, "raw", MappingProxyType(dict(self.raw)))
-
-    @property
-    def bjd_sigungu_code(self) -> str:
-        """법정동 시군구 코드 5자리를 반환한다."""
-
-        code = self.bjd_region.sigungu_code_value
-        if code is None:
-            raise ValueError("bjd_region does not contain a sigungu code")
-        return code
-
-    @property
-    def bjd_sido_code(self) -> str:
-        """법정동 시도 코드 2자리 접두어를 반환한다."""
-
-        code = self.bjd_region.sido_code
-        if code is None:
-            raise ValueError("bjd_region does not contain a sido code")
-        return code
 
 
 def _validate_sigungu_code(sigungu_code: str) -> str:
@@ -174,12 +159,12 @@ def _pick_sigungu_item(
     raise OpinetServerError(f"VWorld returned multiple sigungu candidates for {sigungu_name!r}")
 
 
-def _region_from_vworld_item(
+def _region_parts_from_vworld_item(
     item: Mapping[str, Any],
     *,
     fallback_sido_name: str,
     fallback_sigungu_name: str,
-) -> AddressRegion:
+) -> tuple[str, str, str, str]:
     code = str(item.get("id", "")).strip()
     title = str(item.get("title", "")).strip()
     title_parts = title.split(maxsplit=1)
@@ -187,11 +172,7 @@ def _region_from_vworld_item(
         sido_name, sigungu_name = title_parts
     else:
         sido_name, sigungu_name = fallback_sido_name, fallback_sigungu_name
-    return AddressRegion.from_sigungu_code(
-        code,
-        sido_name=sido_name,
-        sigungu_name=sigungu_name,
-    )
+    return code, code[:2], sido_name, sigungu_name
 
 
 def resolve_sigungu_bjd_code(
@@ -240,16 +221,20 @@ def resolve_sigungu_bjd_code(
         if item is None:
             continue
 
+        bjd_sigungu_code, bjd_sido_code, bjd_sido_name, bjd_sigungu_name = _region_parts_from_vworld_item(
+            item,
+            fallback_sido_name=sido.name,
+            fallback_sigungu_name=sigungu.name,
+        )
         return OpinetSigunguBjdMapping(
             opinet_sigungu_code=normalized_code,
             opinet_sigungu_name=sigungu.name,
             opinet_sido_code=sido_code,
             opinet_sido_name=sido.name,
-            bjd_region=_region_from_vworld_item(
-                item,
-                fallback_sido_name=sido.name,
-                fallback_sigungu_name=sigungu.name,
-            ),
+            bjd_sigungu_code=bjd_sigungu_code,
+            bjd_sido_code=bjd_sido_code,
+            bjd_sido_name=bjd_sido_name,
+            bjd_sigungu_name=bjd_sigungu_name,
             vworld_title=str(item.get("title", "")).strip(),
             vworld_query=query,
             raw=item,

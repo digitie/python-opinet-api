@@ -1,7 +1,6 @@
 from datetime import date, time
 
 import pytest
-from kraddr.base import PlaceCoordinate
 
 from opinet import (
     AreaCode,
@@ -91,8 +90,8 @@ def test_station_request_product_context_coordinates_and_raw(client, load_fixtur
     assert station.raw["PRICE"] == "1538"
     assert station.price == pytest.approx(1538.0)
 
-    assert station.katec_coordinate.as_x_y() == (station.katec_x, station.katec_y)
-    assert station.coordinate.as_lon_lat() == pytest.approx((station.lon, station.lat))
+    assert station.katec_xy == (station.katec_x, station.katec_y)
+    assert station.lon_lat == pytest.approx((station.lon, station.lat))
     with pytest.raises(TypeError):
         station.raw["PRICE"] = "0"
 
@@ -118,7 +117,8 @@ def test_around_station_request_product_context(client, load_fixture, mock_opine
     mock_opinet.add("aroundAll.do", json=load_fixture("around_all_gangnam.json"))
 
     stations = client.search_stations_around(
-        coordinate=PlaceCoordinate(lat=37.4979, lon=127.0276),
+        lon=127.0276,
+        lat=37.4979,
         prodcd=ProductCode.DIESEL,
     )
 

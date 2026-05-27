@@ -23,7 +23,7 @@
 - 저장소의 1차 범위는 공식 오픈 API 페이지에 등재된 5개 엔드포인트 구현이다.
 - PDF 가이드북의 추가 API는 검증 전까지 `opinet.experimental`에 둔다.
 - Python 3.11 이상을 기준으로 하며 `dataclass(frozen=True, slots=True)`와 `StrEnum`을 사용한다.
-- 런타임 의존성은 `httpx`, `pydantic`, `python-kraddr-base[geo]`이고 테스트는 `pytest`, `respx`, `pytest-cov`를 기준으로 한다.
+- 런타임 의존성은 `httpx`, `pydantic`, `pyproj`이고 테스트는 `pytest`, `respx`, `pytest-cov`를 기준으로 한다.
 - 라이선스는 루트 `LICENSE`를 따른다.
 
 ## Provider API 사용 원칙
@@ -40,12 +40,12 @@
 - 공식 구현 대상은 `avgAllPrice.do`, `lowTop10.do`, `aroundAll.do`, `detailById.do`, `areaCode.do` 5개다.
 - API 응답의 숫자, 날짜, 시간, 플래그는 문자열로 오더라도 모델 경계에서 Python 네이티브 타입으로 변환한다.
 - 선행 0이 의미 있는 값(`AREA_CD`, `SIGUNCD`, `UNI_ID`, 제품/상표 코드)은 `int`로 변환하지 않는다.
-- KATEC 좌표는 API 내부 좌표계이고, 공개 사용성은 WGS84를 함께 제공한다.
-- 좌표 변환은 `kraddr.base.PlaceCoordinate`와 `kraddr.base.KatecPoint`를 직접 사용한다. `opinet` 내부에 별도 wrapper, proxy dataclass, 호환 adapter를 만들지 않는다.
+- KATEC 좌표는 API 내부 좌표계이고, 공개 사용성은 WGS84 `lon`/`lat`와 KATEC `katec_x`/`katec_y` 원시 좌표 쌍을 함께 제공한다.
+- 좌표 변환은 `src/opinet/coords.py`에서 `pyproj`를 직접 사용한다. 외부 좌표 DTO wrapper, proxy dataclass, 호환 adapter를 만들지 않는다.
 - `LPG_YN`은 LPG 판매 여부가 아니라 업종 구분이며 `StationType`으로 매핑한다.
 - `KPETRO_YN`은 알뜰주유소 여부가 아니라 품질인증 여부이며 `is_kpetro`로 매핑한다.
 - 알뜰주유소 여부는 상표 코드 `RTO`, `RTE`, `RTX`, `NHO`로 판정한다.
-- `SIGUNCD`를 법정동 시군구 코드로 매핑해야 하면 `vworld.VworldClient.search_district(..., category="L2")` 결과를 `kraddr.base.AddressRegion`으로 명시 매칭한다. 코드값 자체를 산술 변환하지 않는다.
+- `SIGUNCD`를 법정동 시군구 코드로 매핑해야 하면 `vworld.VworldClient.search_district(..., category="L2")` 결과의 `id`/`title`을 명시 매칭한다. 코드값 자체를 산술 변환하지 않는다.
 - 인증키, 실제 API 키, 원본 비밀값은 코드, fixture, 로그, 문서에 남기지 않는다.
 - 로컬 live 테스트 키는 `.env` 또는 환경변수에만 둔다. `.env.example` 외의 `.env*` 파일은 커밋하지 않는다.
 
@@ -59,7 +59,7 @@
 - HTTP/에러 매핑: `src/opinet/_http.py`
 - 타입 변환: `src/opinet/_convert.py`
 - 코드표/enum/시도 매핑: `src/opinet/codes.py`
-- 공통 좌표/장소 DTO: `kraddr.base.PlaceCoordinate`, `kraddr.base.KatecPoint`
+- 좌표 변환 helper: `src/opinet/coords.py`
 - 응답 모델: `src/opinet/models.py`
 - 미검증 API: `src/opinet/experimental/`
 - 테스트 fixture: `tests/fixtures/`
@@ -78,7 +78,7 @@
 ## 작업 원칙
 - 구현 작업 전에는 `opinet-api.md`의 관련 엔드포인트 섹션과 `SKILL.md`의 불변 조건을 먼저 확인한다.
 - 변경은 가능한 한 작은 완성 단위로 만들고, 공개 API 이름과 타입 안정성을 우선한다.
-- 공통 타입이나 변환 로직이 `kraddr.base` 같은 다른 TripMate 라이브러리에 이미 있으면 최소 수정 범위보다 직접 의존과 직접 적용을 우선한다.
+- 주유소 좌표/지역 매핑 관련 타입과 변환 로직은 이 저장소 안에서 직접 소유한다.
 - 불필요한 compatibility wrapper, mirror dataclass, 단순 위임 함수는 만들지 않는다. 기존 공개 API를 깨야 하더라도 문서와 테스트를 함께 고쳐 공통 구현을 직접 쓰는 방향으로 정리한다.
 - 응답 파싱 로직은 raw 문자열을 사용자 모델에 그대로 흘리지 않는다.
 - HTTP 상태와 body 기반 오류 매핑은 `_http.py` 한 곳에 모은다.
@@ -95,7 +95,7 @@
 - 타입 검사: `python -m mypy src/opinet`
 - 실제 API 스모크: `pytest -m live --run-live` (`OPINET_API_KEY` 필요)
 - HTTP mocking 테스트는 `respx`로 `httpx` 호출을 재생한다.
-- 좌표 변환 자체는 `kraddr.base` 테스트에서 검증하고, `python-opinet-api`에서는 요청/응답 모델 경계가 `PlaceCoordinate`와 `KatecPoint`를 직접 쓰는지 검증한다.
+- 좌표 변환 자체와 요청/응답 모델 경계는 `python-opinet-api` 테스트에서 검증한다.
 - 타입 변환 테스트는 정상값, 빈 문자열/공백/None, 잘못된 포맷을 모두 포함한다.
 
 ## 반복 실수 방지

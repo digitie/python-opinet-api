@@ -4,7 +4,6 @@ from zoneinfo import ZoneInfo
 
 import pytest
 from pydantic import BaseModel, ValidationError
-from kraddr.base import KatecPoint, PlaceCoordinate
 
 from opinet import (
     FuelType,
@@ -87,12 +86,10 @@ def test_station_to_normalized_record_without_provider_product_name(client, load
     assert normalized.distance_m is None
     assert normalized.address_jibun == station.address_jibun
     assert normalized.address_road == station.address_road
-    assert isinstance(normalized.coordinate, PlaceCoordinate)
-    assert normalized.coordinate == station.coordinate
-    assert isinstance(normalized.katec_coordinate, KatecPoint)
-    assert normalized.katec_coordinate == station.katec_coordinate
     assert normalized.katec_x == station.katec_x
+    assert normalized.katec_y == station.katec_y
     assert normalized.lon == station.lon
+    assert normalized.lat == station.lat
     assert normalized.trade_datetime() is None
     assert station.trade_datetime() is None
     assert normalized.raw["PRICE"] == "1538"
@@ -149,10 +146,6 @@ def test_station_detail_to_normalized_record(client, load_fixture, mock_opinet):
     assert normalized.address_jibun == detail.address_jibun
     assert normalized.address_road == detail.address_road
     assert normalized.tel == "02-562-4855"
-    assert isinstance(normalized.coordinate, PlaceCoordinate)
-    assert normalized.coordinate == detail.coordinate
-    assert isinstance(normalized.katec_coordinate, KatecPoint)
-    assert normalized.katec_coordinate == detail.katec_coordinate
     assert normalized.katec_x == detail.katec_x
     assert normalized.katec_y == detail.katec_y
     assert normalized.lon == detail.lon

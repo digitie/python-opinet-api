@@ -7,7 +7,6 @@ from datetime import date
 from pathlib import Path
 
 import pytest
-from kraddr.base import KatecPoint, PlaceCoordinate
 
 from opinet import OpinetClient, ProductCode
 from opinet.debug import (
@@ -154,8 +153,6 @@ def test_jsonable_redaction_slug_and_assertions() -> None:
     assert slugify_case_name(" ... ") == "case"
     assert jsonable(ProductCode.GASOLINE) == "B027"
     assert jsonable(date(2026, 5, 15)) == "2026-05-15"
-    assert jsonable(PlaceCoordinate(lat=37.5, lon=127.0)) == {"lat": 37.5, "lon": 127.0}
-    assert jsonable(KatecPoint(314871.8, 544012.0)) == {"x": 314871.8, "y": 544012.0}
     assert jsonable(object()).startswith("<object object at")
     assert redact_sensitive({"nested": [{"access_token": "secret"}]}) == {
         "nested": [{"access_token": "<REDACTED>"}]
@@ -207,7 +204,8 @@ def test_debug_client_runs_avg_around_and_detail(load_fixture, mock_opinet) -> N
 
     avg_run = client.debug().get_national_average_price()
     around_run = client.debug().search_stations_around(
-        katec=KatecPoint(314871.8, 544012.0),
+        katec_x=314871.8,
+        katec_y=544012.0,
         radius_m=1000,
         prodcd="B027",
         sort="2",
@@ -235,7 +233,8 @@ def test_debug_client_captures_runtime_and_validation_errors(
         OpinetClient(retry_backoff=0).debug().get_area_codes(raise_errors=True)
 
     invalid_around = OpinetClient("secret-key", retry_backoff=0).debug().search_stations_around(
-        coordinate=PlaceCoordinate(lat=37.5, lon=127.0),
+        lon=127.0,
+        lat=37.5,
         radius_m=0,
     )
     assert invalid_around.error["type"] == "OpinetInvalidParameterError"

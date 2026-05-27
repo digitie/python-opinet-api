@@ -15,12 +15,11 @@ from types import MappingProxyType
 from typing import Any
 from zoneinfo import ZoneInfo
 
-from kraddr.base import KatecPoint, PlaceCoordinate
 from pydantic import BaseModel
 
 from ._http import _OpinetHttp
 from .catalog import ApiCatalogItem, get_api_catalog_item
-from .client import OpinetClient, _coerce_product_code, _coerce_sort_order, _validate_area_param
+from .client import OpinetClient, _coerce_product_code, _coerce_sort_order, _coordinate_query_params, _validate_area_param
 from .codes import ProductCode, SortOrder
 from .exceptions import OpinetInvalidParameterError
 
@@ -98,10 +97,6 @@ class DebugRun:
 
 def jsonable(obj: Any) -> Any:
     """Pydantic, dataclass, enum, 날짜 값을 JSON 저장 가능한 값으로 변환한다."""
-    if isinstance(obj, PlaceCoordinate):
-        return {"lon": obj.lon, "lat": obj.lat}
-    if isinstance(obj, KatecPoint):
-        return {"x": obj.x, "y": obj.y}
     if isinstance(obj, BaseModel):
         return obj.model_dump(mode="json")
     if obj is None or isinstance(obj, bool | int | float | str):
@@ -394,8 +389,10 @@ class OpinetDebugClient:
     def search_stations_around(
         self,
         *,
-        coordinate: PlaceCoordinate | None = None,
-        katec: KatecPoint | None = None,
+        lon: float | None = None,
+        lat: float | None = None,
+        katec_x: float | None = None,
+        katec_y: float | None = None,
         radius_m: int = 5000,
         prodcd: ProductCode | str = ProductCode.GASOLINE,
         sort: SortOrder | str = SortOrder.PRICE,
@@ -403,22 +400,18 @@ class OpinetDebugClient:
     ) -> DebugRun:
         """주변 주유소 검색 API를 실행하고 디버그 결과를 반환한다."""
         input_data = {
-            "coordinate": jsonable(coordinate),
-            "katec": jsonable(katec),
+            "lon": lon,
+            "lat": lat,
+            "katec_x": katec_x,
+            "katec_y": katec_y,
             "radius_m": radius_m,
             "prodcd": jsonable(prodcd),
             "sort": jsonable(sort),
         }
         try:
-            if (coordinate is None) == (katec is None):
-                raise OpinetInvalidParameterError("pass exactly one of coordinate or katec")
             if not 1 <= radius_m <= 5000:
                 raise OpinetInvalidParameterError("radius_m must be between 1 and 5000")
-            if coordinate is not None:
-                x, y = coordinate.to_katec().as_x_y()
-            else:
-                assert katec is not None
-                x, y = katec.as_x_y()
+            x, y = _coordinate_query_params(lon=lon, lat=lat, katec_x=katec_x, katec_y=katec_y)
             product_code = _coerce_product_code(prodcd)
             sort_order = _coerce_sort_order(sort)
         except Exception as exc:

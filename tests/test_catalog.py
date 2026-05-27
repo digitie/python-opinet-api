@@ -40,7 +40,7 @@ def test_api_catalog_lookup_and_streamlit_options() -> None:
     assert item.dataset == "nearby_station_price"
     assert item.dataset_name == "반경 내 주유소 가격"
     assert item.display_name == "반경 내 주유소 가격 (aroundAll.do)"
-    assert item.to_dict()["parameters"][0]["name"] == "coordinate"
+    assert item.to_dict()["parameters"][0]["name"] == "lon"
 
     assert get_api_catalog_item(function_name="get_area_codes").endpoint == "areaCode.do"
     assert get_api_catalog_item(dataset="station_detail").endpoint == "detailById.do"

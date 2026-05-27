@@ -1,7 +1,6 @@
 from datetime import date, time
 
 import pytest
-from kraddr.base import KatecPoint, PlaceCoordinate
 
 from opinet import BrandCode, OpinetClient, ProductCode, SortOrder, StationType
 from opinet.exceptions import OpinetAuthError, OpinetInvalidParameterError, OpinetNoDataError, OpinetServerError
@@ -119,7 +118,8 @@ def test_around_all_wgs84_types_and_query(client, load_fixture, mock_opinet):
     mock_opinet.add("aroundAll.do", json=load_fixture("around_all_gangnam.json"))
 
     stations = client.search_stations_around(
-        coordinate=PlaceCoordinate(lat=37.4979, lon=127.0276),
+        lon=127.0276,
+        lat=37.4979,
         radius_m=3000,
         prodcd=ProductCode.GASOLINE,
         sort=SortOrder.PRICE,
@@ -133,8 +133,7 @@ def test_around_all_wgs84_types_and_query(client, load_fixture, mock_opinet):
     assert first.distance_m == pytest.approx(846.6)
     assert 127.02 < first.lon < 127.06
     assert 37.49 < first.lat < 37.51
-    assert isinstance(first.coordinate, PlaceCoordinate)
-    assert first.coordinate.as_lon_lat() == pytest.approx((first.lon, first.lat))
+    assert first.lon_lat == pytest.approx((first.lon, first.lat))
     query = mock_opinet.query()
     assert query["radius"] == ["3000"]
     assert query["prodcd"] == ["B027"]
@@ -146,7 +145,7 @@ def test_around_all_wgs84_types_and_query(client, load_fixture, mock_opinet):
 def test_around_all_place_coordinate_query(client, load_fixture, mock_opinet):
     mock_opinet.add("aroundAll.do", json=load_fixture("around_all_gangnam.json"))
 
-    client.search_stations_around(coordinate=PlaceCoordinate(lat=37.4979, lon=127.0276), radius_m=1000)
+    client.search_stations_around(lon=127.0276, lat=37.4979, radius_m=1000)
 
     query = mock_opinet.query()
     assert float(query["x"][0]) == pytest.approx(314213.3092)
@@ -156,7 +155,7 @@ def test_around_all_place_coordinate_query(client, load_fixture, mock_opinet):
 def test_around_all_katec_query(client, load_fixture, mock_opinet):
     mock_opinet.add("aroundAll.do", json=load_fixture("around_all_gangnam.json"))
 
-    client.search_stations_around(katec=KatecPoint(314871.8, 544012.0), radius_m=1000, sort=SortOrder.DISTANCE)
+    client.search_stations_around(katec_x=314871.8, katec_y=544012.0, radius_m=1000, sort=SortOrder.DISTANCE)
 
     query = mock_opinet.query()
     assert float(query["x"][0]) == pytest.approx(314871.8)
@@ -168,9 +167,11 @@ def test_around_all_katec_query(client, load_fixture, mock_opinet):
     "kwargs",
     [
         {},
-        {"coordinate": PlaceCoordinate(lat=37.5, lon=127.0), "katec": KatecPoint(300000.0, 540000.0)},
-        {"coordinate": PlaceCoordinate(lat=37.5, lon=127.0), "radius_m": 0},
-        {"coordinate": PlaceCoordinate(lat=37.5, lon=127.0), "radius_m": 5001},
+        {"lon": 127.0, "lat": 37.5, "katec_x": 300000.0, "katec_y": 540000.0},
+        {"lon": 127.0, "lat": 37.5, "radius_m": 0},
+        {"lon": 127.0, "lat": 37.5, "radius_m": 5001},
+        {"lon": 127.0},
+        {"katec_x": 300000.0},
     ],
 )
 def test_around_invalid_params(client, kwargs):
@@ -196,8 +197,7 @@ def test_detail_full_type_mapping(client, load_fixture, mock_opinet):
     assert isinstance(detail.katec_y, float)
     assert isinstance(detail.lon, float)
     assert isinstance(detail.lat, float)
-    assert isinstance(detail.coordinate, PlaceCoordinate)
-    assert detail.coordinate.as_lon_lat() == pytest.approx((detail.lon, detail.lat))
+    assert detail.lon_lat == pytest.approx((detail.lon, detail.lat))
     assert detail.has_maintenance is True
     assert detail.has_carwash is True
     assert detail.has_cvs is False
