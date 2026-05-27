@@ -11,7 +11,6 @@ from pathlib import Path
 import pytest
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
-KRADDR_BASE_ROOT = PROJECT_ROOT.parent / "python-kraddr-base"
 
 
 def _run(args: list[str], *, cwd: Path | None = None) -> subprocess.CompletedProcess[str]:
@@ -71,10 +70,7 @@ def test_built_distribution_install_import_and_downstream_mypy(
     venv.EnvBuilder(with_pip=True, system_site_packages=True).create(venv_dir)
     python = _venv_python(venv_dir)
 
-    if KRADDR_BASE_ROOT.exists():
-        _run([str(python), "-m", "pip", "install", "--no-deps", str(KRADDR_BASE_ROOT)], cwd=tmp_path)
-
-    install_args = [str(python), "-m", "pip", "install", "--no-deps"]
+    install_args = [str(python), "-m", "pip", "install"]
     if dist_kind == "sdist":
         install_args.append("--no-build-isolation")
     _run([*install_args, str(built_distributions[dist_kind])], cwd=tmp_path)
@@ -86,7 +82,6 @@ from datetime import date, time
 
 import opinet
 import opinet.normalized
-from kraddr.base import KatecPoint, PlaceCoordinate
 from opinet import (
     FuelType,
     NormalizedFuelAverage,
@@ -127,8 +122,6 @@ detail = NormalizedFuelStationDetail(
     address_jibun="서울 강남구 역삼동 834-47",
     address_road="서울 강남구 역삼로 142",
     tel="02-562-4855",
-    coordinate=PlaceCoordinate(lat=37.5006, lon=127.0381),
-    katec_coordinate=KatecPoint(314871.8, 544012.0),
     katec_x=314871.8,
     katec_y=544012.0,
     lon=127.0381,
@@ -155,7 +148,6 @@ assert record.model_dump(mode="json")["trade_date"] == "2025-07-23"
         """
 from datetime import date, time
 
-from kraddr.base import KatecPoint, PlaceCoordinate
 from opinet import (
     FuelType,
     NormalizedFuelAverage,
@@ -197,8 +189,6 @@ detail = NormalizedFuelStationDetail(
     address_jibun="서울 강남구 역삼동 834-47",
     address_road="서울 강남구 역삼로 142",
     tel="02-562-4855",
-    coordinate=PlaceCoordinate(lat=37.5006, lon=127.0381),
-    katec_coordinate=KatecPoint(314871.8, 544012.0),
     katec_x=314871.8,
     katec_y=544012.0,
     lon=127.0381,
@@ -223,7 +213,18 @@ reveal_type(payload)
 """.lstrip(),
         encoding="utf-8",
     )
-    mypy = _run([str(python), "-m", "mypy", "--no-error-summary", str(downstream)], cwd=tmp_path)
+    mypy = _run(
+        [
+            sys.executable,
+            "-m",
+            "mypy",
+            "--python-executable",
+            str(python),
+            "--no-error-summary",
+            str(downstream),
+        ],
+        cwd=tmp_path,
+    )
     assert "opinet.normalized.NormalizedFuelAverage" in mypy.stdout
     assert "opinet.normalized.NormalizedFuelStationDetail" in mypy.stdout
     assert 'Revealed type is "float"' in mypy.stdout

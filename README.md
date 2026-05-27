@@ -80,19 +80,17 @@ for row in client.get_national_average_price():
     assert isinstance(row.product_code, ProductCode)  # "B027" → enum
     print(f"{row.product_name}: {row.price:,.2f}원 ({row.diff:+.2f}) — {row.trade_date}")
 
-# 2) 강남역 반경 3km 내 가장 싼 휘발유 5곳 — kraddr.base 좌표 DTO 사용
-from kraddr.base import PlaceCoordinate
-
+# 2) 강남역 반경 3km 내 가장 싼 휘발유 5곳
 stations = client.search_stations_around(
-    coordinate=PlaceCoordinate(lat=37.4979, lon=127.0276),  # 강남역 위경도
+    lon=127.0276,
+    lat=37.4979,  # 강남역 위경도
     radius_m=3000,
     prodcd=ProductCode.GASOLINE,
     sort=SortOrder.PRICE,
 )
 for s in stations[:5]:
-    # coordinate는 kraddr.base.PlaceCoordinate, KATEC 원본은 KatecPoint
     print(f"{s.name}: {s.price:,.0f}원, {s.distance_m:.0f}m, "
-          f"({s.coordinate.lon:.4f}, {s.coordinate.lat:.4f})")
+          f"({s.lon:.4f}, {s.lat:.4f})")
 
 # 3) 주유소 ID로 상세 조회
 detail = client.get_station_detail("A0010207")
@@ -236,32 +234,30 @@ is_alddle(BrandCode.SKE)  # False
 
 오피넷 API는 모든 좌표를 **KATEC** (오피넷 자체 TM 좌표계, m 단위)로 주고받습니다. 일반적인 위경도(WGS84)와 다릅니다.
 
-본 라이브러리는 사용자 입력을 `kraddr.base.PlaceCoordinate`로 받고, KATEC 변환은 `kraddr.base`의 좌표 객체가 처리합니다.
+본 라이브러리는 WGS84 `lon`/`lat` 또는 KATEC `katec_x`/`katec_y` 원시 좌표 쌍을 받습니다. WGS84 입력은 내부에서 KATEC으로 변환해 `aroundAll.do`에 전달합니다.
 
 ```python
-from kraddr.base import PlaceCoordinate
-
-# 입력: kraddr.base.PlaceCoordinate (WGS84 lat/lon DTO)
 stations = client.search_stations_around(
-    coordinate=PlaceCoordinate(lat=37.4979, lon=127.0276),
+    lon=127.0276,
+    lat=37.4979,
     ...
 )
 
-# 응답 모델: PlaceCoordinate + KATEC 원본 둘 다 들어있음
+# 응답 모델: WGS84와 KATEC 원본 float를 함께 제공
 station = stations[0]
-station.coordinate                # kraddr.base.PlaceCoordinate
-station.katec_coordinate          # kraddr.base.KatecPoint
-station.lon, station.lat          # 호환용 WGS84 float
-station.katec_x, station.katec_y  # 호환용 KATEC float
+station.lon, station.lat          # WGS84 float
+station.katec_x, station.katec_y  # KATEC float
+station.lon_lat                   # (lon, lat)
+station.katec_xy                  # (x, y)
 ```
 
-직접 변환이 필요하면 `kraddr.base`를 바로 사용합니다:
+직접 변환이 필요하면 `opinet.coords`를 사용합니다:
 
 ```python
-from kraddr.base import KatecPoint, PlaceCoordinate
+from opinet.coords import katec_to_wgs84, wgs84_to_katec
 
-x, y = PlaceCoordinate(lat=37.4979, lon=127.0276).to_katec().as_x_y()
-coord = PlaceCoordinate.from_katec(KatecPoint(314871.80, 544012.00))  # SK서광주유소
+x, y = wgs84_to_katec(127.0276, 37.4979)
+lon, lat = katec_to_wgs84(314871.80, 544012.00)  # SK서광주유소
 ```
 
 ### KATEC proj 정의
@@ -328,7 +324,6 @@ bjd_sido_to_opinet("52")  # → "06" (전북특별자치도 신코드 → 오피
 ## 에러 처리
 
 ```python
-from kraddr.base import PlaceCoordinate
 from opinet.exceptions import (
     OpinetError,                  # 공통 베이스
     OpinetAuthError,              # 인증 실패 (Invalid Key, 401, 403)
@@ -341,7 +336,8 @@ from opinet.exceptions import (
 
 try:
     stations = client.search_stations_around(
-        coordinate=PlaceCoordinate(lat=37.5, lon=127.0),
+        lon=127.0,
+        lat=37.5,
         radius_m=10000,
     )
 except OpinetInvalidParameterError as e:
@@ -493,7 +489,7 @@ skill 파일은 다음을 정의합니다:
 **런타임:**
 - `httpx` ≥ 0.27
 - `pydantic` ≥ 2.0
-- `python-kraddr-base[geo]` ≥ 0.1.5
+- `pyproj` ≥ 3.5
 
 **선택 기능:**
 - `python-vworld-api` ≥ 0.1.0 (`pip install python-opinet-api[vworld]`, VWorld로 시군구 법정동코드 매핑을 할 때)
@@ -688,22 +684,16 @@ station.brand_code             # OpiNet POLL_DIV_CO/POLL_DIV_CD 원문 code
 
 최저가/주변검색 응답 row에 `TRADE_DT` 또는 `TRADE_TM`이 실제로 포함되면 `Station.trade_date`와 `Station.trade_time`에 각각 `datetime.date`, `datetime.time`으로 노출됩니다. 필드가 없으면 `None`입니다.
 
-### 좌표 value object
+### 좌표 필드
 
-기존 호환 필드인 `station.katec_x`, `station.katec_y`, `station.lon`, `station.lat`는 그대로 유지됩니다. 새 코드에서는 `kraddr.base`의 `PlaceCoordinate`와 `KatecPoint`를 직접 사용합니다.
+`station.katec_x`, `station.katec_y`, `station.lon`, `station.lat`는 그대로 유지됩니다. 좌표 객체 의존성 없이 tuple helper만 제공합니다.
 
 ```python
-coord = station.coordinate
-katec = station.katec_coordinate
-
-coord.lon, coord.lat    # WGS84 (lon, lat), degrees
-katec.x, katec.y        # KATEC (x, y), meters
-
-coord.as_lon_lat()      # (lon, lat)
-katec.as_x_y()          # (x, y)
+station.lon, station.lat          # WGS84 (lon, lat), degrees
+station.katec_x, station.katec_y  # KATEC (x, y), meters
+station.lon_lat                   # (lon, lat)
+station.katec_xy                  # (x, y)
 ```
-
-`PlaceCoordinate`와 `KatecPoint`는 `kraddr.base`가 제공합니다. WGS84 공개 DTO 축 순서는 `PlaceCoordinate(lat=..., lon=...)`입니다. KATEC 변환과 WKT/GeoJSON 출력 경계에서는 각 표준에 맞춰 `(x, y)` 또는 `(lon, lat)`를 사용합니다.
 
 ### AreaCode helper
 
@@ -733,9 +723,10 @@ mapping = resolve_sigungu_bjd_code(
 )
 
 mapping.opinet_sigungu_name  # "강남구"
-mapping.bjd_region           # kraddr.base.AddressRegion
-mapping.bjd_region.sigungu_code_value  # "11680"
-mapping.bjd_sigungu_code     # "11680" (derived convenience property)
+mapping.bjd_sigungu_code     # "11680"
+mapping.bjd_sido_code        # "11"
+mapping.bjd_sido_name        # "서울특별시"
+mapping.bjd_sigungu_name     # "강남구"
 mapping.vworld_title         # "서울특별시 강남구"
 ```
 

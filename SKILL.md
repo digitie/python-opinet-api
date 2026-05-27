@@ -1,6 +1,6 @@
 ---
 name: python-opinet-api-builder
-description: Use this skill when the user asks to build, extend, debug, or test a Python client library for the Korean Opinet (오피넷) free fuel-price API. Triggers include any mention of "오피넷", "opinet", "유가정보 API", "주유소 가격 API", or filenames like src/opinet/client.py. Also use when wiring Opinet KATEC/WGS84 coordinates through kraddr.base, mapping Opinet sido codes to BJD (법정동) codes, or mapping Opinet HTTP/body errors to Python exceptions. Do NOT use for unrelated KNOC datasets, gov.kr public data portal datasets, or non-Korean fuel APIs.
+description: Use this skill when the user asks to build, extend, debug, or test a Python client library for the Korean Opinet (오피넷) free fuel-price API. Triggers include any mention of "오피넷", "opinet", "유가정보 API", "주유소 가격 API", or filenames like src/opinet/client.py. Also use when wiring Opinet KATEC/WGS84 coordinates, mapping Opinet sido codes to BJD (법정동) codes, or mapping Opinet HTTP/body errors to Python exceptions. Do NOT use for unrelated KNOC datasets, gov.kr public data portal datasets, or non-Korean fuel APIs.
 ---
 
 # Opinet Python Library Builder
@@ -12,7 +12,7 @@ You are helping build/maintain a Python client for the Korean **Opinet** free fu
 1. **Base URL**: `https://www.opinet.co.kr/api/`
 2. **Auth parameter**: `certkey` (NOT `code`). The official site uses `certkey`. Some unofficial blogs use `code` — that's a different gateway (PDF guidebook's `custApi`).
 3. **Output format**: always request `out=json`. XML is debug-only.
-4. **Coordinate system**: every response coordinate (`GIS_X_COOR`, `GIS_Y_COOR`) and every request coordinate (`x`, `y` for `aroundAll.do`) is **KATEC**. Use `kraddr.base.PlaceCoordinate` for WGS84 and `kraddr.base.KatecPoint` for KATEC directly.
+4. **Coordinate system**: every response coordinate (`GIS_X_COOR`, `GIS_Y_COOR`) and every request coordinate (`x`, `y` for `aroundAll.do`) is **KATEC**. Public inputs use WGS84 `lon`/`lat` or KATEC `katec_x`/`katec_y` primitive pairs.
 5. **Quota**: ~1,500 calls/day per the PDF guidebook. Do not add automatic retries for 401/403/429.
 6. **No XML parsing in user-facing methods**.
 7. **All response fields are converted to Python native types** before the model is returned to the user. The API itself returns everything as strings. See "Type conversion policy" below.
@@ -32,11 +32,11 @@ You are helping build/maintain a Python client for the Korean **Opinet** free fu
 
 ## Shared-library reuse invariants
 
-1. 공통 타입, 좌표 변환, POI 정규화처럼 다른 TripMate 라이브러리에 이미 구현된 기능은 `opinet` 안에 다시 만들지 말고 해당 라이브러리를 직접 의존한다.
-2. `kraddr.base`가 제공하는 `PlaceCoordinate`, `KatecPoint` 같은 값 객체는 파라미터와 리턴 모델에서 그대로 사용한다. 단순 wrapper, compatibility alias, mirror dataclass, proxy method를 새로 만들지 않는다.
-3. 오피넷 4자리 시군구 코드를 법정동 시군구 코드로 해석해야 하면 `vworld.VworldClient.search_district(..., category="L2")` 결과의 5자리 `id`를 `kraddr.base.AddressRegion`으로 명시 매칭한다. 코드를 산술 변환하지 않는다.
+1. 주유소 좌표/지역 매핑 관련 타입과 변환 로직은 이 저장소 안에서 직접 소유한다.
+2. 외부 좌표/주소 DTO를 파라미터와 리턴 모델에 노출하지 않는다. 단순 wrapper, compatibility alias, mirror dataclass, proxy method를 새로 만들지 않는다.
+3. 오피넷 4자리 시군구 코드를 법정동 시군구 코드로 해석해야 하면 `vworld.VworldClient.search_district(..., category="L2")` 결과의 5자리 `id`와 `title`을 명시 매칭한다. 코드를 산술 변환하지 않는다.
 4. 이 원칙은 "최소 수정"보다 우선한다. 직접 의존으로 공개 API 변경이 필요하면 README, `opinet-api.md`, tests를 함께 바꿔 새 경계를 명확히 한다.
-5. `SIGUNCD`는 오피넷 자체 4자리 시군구 코드다. 법정동 5자리 시군구 코드나 10자리 법정동코드와 같다고 추정하거나 `kraddr.base` 법정동 DTO로 강제 변환하지 않는다.
+5. `SIGUNCD`는 오피넷 자체 4자리 시군구 코드다. 법정동 5자리 시군구 코드나 10자리 법정동코드와 같다고 추정하지 않는다.
 
 ## Five official endpoints (start here)
 
@@ -74,7 +74,7 @@ python-opinet-api/
 ├── tests/conftest.py
 ├── tests/fixtures/*.json      # captured responses (see "Initial fixtures" below)
 ├── tests/test_*.py
-└── pyproject.toml             # deps: httpx, pydantic, python-kraddr-base[geo]; dev: pytest, respx, pytest-cov
+└── pyproject.toml             # deps: httpx, pydantic, pyproj; dev: pytest, respx, pytest-cov
 ```
 
 ## Type conversion policy ⭐ CRITICAL
@@ -233,9 +233,9 @@ Type conversion errors (e.g., bad date format from server) should be caught at t
 
 ## KATEC ↔ WGS84
 
-Opinet KATEC 변환 로직은 `kraddr.base`에 둔다. `opinet`은 `kraddr.base.PlaceCoordinate.to_katec()`, `PlaceCoordinate.from_katec()`, `kraddr.base.KatecPoint`를 직접 호출하고, 내부 `coords.py`나 얇은 wrapper를 다시 만들지 않는다.
+Opinet KATEC 변환 로직은 `src/opinet/coords.py`에 둔다. `opinet`은 `pyproj`를 직접 사용해 WGS84 `lon`/`lat`와 KATEC `katec_x`/`katec_y` 원시 좌표 쌍을 변환한다.
 
-좌표 변환의 proj 문자열, transformer singleton, roundtrip tolerance는 `kraddr.base` 테스트와 문서가 소유한다. `opinet` 테스트는 aroundAll 요청 파라미터가 `PlaceCoordinate`/`KatecPoint`에서 나온 값인지, 응답 모델이 같은 값 객체를 리턴하는지만 검증한다.
+좌표 변환의 proj 문자열, transformer cache, roundtrip tolerance는 `python-opinet-api` 테스트와 문서가 소유한다. `opinet` 테스트는 aroundAll 요청 파라미터와 응답 모델의 WGS84/KATEC float 경계를 검증한다.
 
 ## Critical field gotchas (DO NOT misinterpret)
 
@@ -525,7 +525,7 @@ def _build_station(oil: dict) -> Station:
 - Don't add LPG_YN/KPETRO_YN to the model with their literal names — use `station_type` and `is_kpetro` to avoid future readers misinterpreting.
 - Don't hardcode sido codes from memory or unofficial sources. Use the official 17-entry table from `opinet-api.md` §2.2.
 - Don't silently coerce `int` for codes with leading zeros — `"0113"` != `113`. Keep them `str`.
-- 좌표 변환은 `kraddr.base` 값 객체를 직접 사용한다. `opinet.coords`, 단순 wrapper, legacy alias를 되살리지 않는다.
+- 좌표 변환은 `opinet.coords`에서 직접 소유한다. 외부 DTO wrapper, legacy alias를 되살리지 않는다.
 - KATEC has multiple "dialects" in the wild (different `+towgs84` values). The values in this skill match Opinet's published station coordinates within ±10 m. Don't change without re-verifying.
 - For BJD mapping, don't try to derive Opinet sigungu (4-digit) codes algorithmically. They're not BJD sigungu/legal-dong codes and are not mappable without an explicit table.
 - `StationDetail` uses `tel`, not `phone`.

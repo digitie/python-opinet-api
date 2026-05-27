@@ -2,7 +2,6 @@ import asyncio
 
 import httpx
 import pytest
-from kraddr.base import KatecPoint
 
 from opinet import AsyncOpinetClient, OpinetClient, ProductCode, SortOrder
 from opinet.exceptions import OpinetAuthError, OpinetInvalidParameterError
@@ -47,7 +46,8 @@ def test_async_client_fetches_average_around_and_detail(load_fixture, mock_opine
         async with AsyncOpinetClient(api_key="test-key", retry_backoff=0) as client:
             averages = await client.get_national_average_price()
             nearby = await client.search_stations_around(
-                katec=KatecPoint(314871.8, 544012.0),
+                katec_x=314871.8,
+                katec_y=544012.0,
                 radius_m=1000,
                 prodcd=ProductCode.GASOLINE,
                 sort=SortOrder.DISTANCE,

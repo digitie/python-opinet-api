@@ -19,7 +19,6 @@ for module_name, module in list(sys.modules.items()):
         del sys.modules[module_name]
 
 import streamlit as st
-from kraddr.base import KatecPoint, PlaceCoordinate
 
 from opinet import (
     OpinetClient,
@@ -160,16 +159,16 @@ def _render_inputs(function_name: str, *, key_prefix: str) -> dict[str, Any]:
                 lon = st.number_input("lon", value=127.0276, format="%.6f", key=f"{key_prefix}:lon")
             with col2:
                 lat = st.number_input("lat", value=37.4979, format="%.6f", key=f"{key_prefix}:lat")
-            coordinate = PlaceCoordinate(lat=lat, lon=lon)
-            katec = None
+            katec_x = None
+            katec_y = None
         else:
             col1, col2 = st.columns(2)
             with col1:
-                x = st.number_input("KATEC X", value=314871.8, format="%.4f", key=f"{key_prefix}:x")
+                katec_x = st.number_input("KATEC X", value=314871.8, format="%.4f", key=f"{key_prefix}:x")
             with col2:
-                y = st.number_input("KATEC Y", value=544012.0, format="%.4f", key=f"{key_prefix}:y")
-            coordinate = None
-            katec = KatecPoint(x, y)
+                katec_y = st.number_input("KATEC Y", value=544012.0, format="%.4f", key=f"{key_prefix}:y")
+            lon = None
+            lat = None
 
         col1, col2, col3 = st.columns(3)
         with col1:
@@ -195,8 +194,10 @@ def _render_inputs(function_name: str, *, key_prefix: str) -> dict[str, Any]:
                 key=f"{key_prefix}:sort",
             )
         return {
-            "coordinate": coordinate,
-            "katec": katec,
+            "lon": lon,
+            "lat": lat,
+            "katec_x": katec_x,
+            "katec_y": katec_y,
             "radius_m": radius_m,
             "prodcd": prodcd,
             "sort": sort,
@@ -232,8 +233,10 @@ def _run_debug(debug_client: Any, function_name: str, inputs: dict[str, Any]) ->
         )
     if function_name == "search_stations_around":
         return debug_client.search_stations_around(
-            coordinate=inputs["coordinate"],
-            katec=inputs["katec"],
+            lon=inputs["lon"],
+            lat=inputs["lat"],
+            katec_x=inputs["katec_x"],
+            katec_y=inputs["katec_y"],
             radius_m=int(inputs["radius_m"]),
             prodcd=inputs["prodcd"],
             sort=inputs["sort"],

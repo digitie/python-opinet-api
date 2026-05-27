@@ -4,7 +4,6 @@ import sys
 import time
 
 import pytest
-from kraddr.base import AddressRegion, PlaceCoordinate
 
 from opinet import AreaCode, AvgPrice, ProductCode, Station, StationDetail
 from opinet.vworld import resolve_sigungu_bjd_code
@@ -79,10 +78,10 @@ def test_live_resolve_opinet_sigungu_code_with_vworld(live_client, live_vworld_c
 
     assert mapping.opinet_sigungu_code == "0113"
     assert mapping.opinet_sigungu_name == "강남구"
-    assert isinstance(mapping.bjd_region, AddressRegion)
-    assert mapping.bjd_region.sigungu_code_value == "11680"
-    assert mapping.bjd_region.administrative_label == "서울특별시 강남구"
     assert mapping.bjd_sigungu_code == "11680"
+    assert mapping.bjd_sido_code == "11"
+    assert mapping.bjd_sido_name == "서울특별시"
+    assert mapping.bjd_sigungu_name == "강남구"
     assert mapping.vworld_title == "서울특별시 강남구"
 
 
@@ -108,7 +107,8 @@ def test_live_official_endpoints_parse_when_key_returns_data(live_client):
     assert isinstance(lowest[0].price, float)
 
     nearby = live_client.search_stations_around(
-        coordinate=PlaceCoordinate(lat=37.4979, lon=127.0276),
+        lon=127.0276,
+        lat=37.4979,
         radius_m=1000,
         prodcd=ProductCode.GASOLINE,
     )
