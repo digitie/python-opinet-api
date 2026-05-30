@@ -49,6 +49,23 @@
 - 인증키, 실제 API 키, 원본 비밀값은 코드, fixture, 로그, 문서에 남기지 않는다.
 - 로컬 live 테스트 키는 `.env` 또는 환경변수에만 둔다. `.env.example` 외의 `.env*` 파일은 커밋하지 않는다.
 
+## 식별자 (혼동 방지)
+
+| 항목 | 값 |
+|------|----|
+| GitHub 저장소 이름 | `python-opinet-api` |
+| 패키지/모듈 이름 | `opinet` |
+| import 경로 | `from opinet import OpinetClient` |
+| 런타임 의존성 | `httpx`, `pydantic`, `pyproj` |
+| 테스트/개발 의존성 | `pytest`, `respx`, `pytest-cov`, `mypy` |
+
+## 에이전트 worktree + CodeGraph
+
+- 에이전트 운용 환경에 따라 `F:\dev\python-opinet-api`를 기본 작업 공간으로 삼습니다. 필요 시 에이전트별로 `opinet-antigravity`, `opinet-claude`, `opinet-codex` 고정 worktree를 구축하여 사용할 수 있습니다.
+- 새 작업은 해당 worktree/저장소에서 `git fetch` 후 `git switch -c agent/<topic> main`으로 브랜치를 새로 생성하여 시작합니다.
+- CodeGraph는 작업 공간마다 1회 `codegraph init -i`로 초기화하고 이후에는 `codegraph sync`를 실행해 최신화 상태를 유지합니다. `.codegraph/` 폴더는 gitignore 대상입니다.
+- 에이전트별 MCP 설정 파일(`antigravity.json`, `claude.json`, `codex.json`)과 로컬 설정은 루트 및 `.gemini/mcp.json`, `.claude/settings.local.json`, `.codex/config.toml`에 각각 존재합니다.
+
 ## 문서 라우팅
 - 사용자용 개요와 예시: `README.md`
 - 구현 상태/유지보수 체크리스트: `docs/implementation-status.md`
@@ -89,14 +106,35 @@
 - 원격 API 동작이 불확실하면 실험 모듈에 두고 "Unverified" 경고를 남긴다.
 
 ## 검증 기준
-- 구조/문법 확인: `python -m compileall src/opinet tests`
-- 단위 테스트: `pytest`
-- 커버리지 목표: `pytest --cov=opinet --cov-fail-under=90`
-- 타입 검사: `python -m mypy src/opinet`
-- 실제 API 스모크: `pytest -m live --run-live` (`OPINET_API_KEY` 필요)
-- HTTP mocking 테스트는 `respx`로 `httpx` 호출을 재생한다.
-- 좌표 변환 자체와 요청/응답 모델 경계는 `python-opinet-api` 테스트에서 검증한다.
-- 타입 변환 테스트는 정상값, 빈 문자열/공백/None, 잘못된 포맷을 모두 포함한다.
+
+```bash
+# 구조 및 문법 확인
+python -m compileall src/opinet tests
+
+# 타입 검사 (품질 게이트)
+python -m mypy src/opinet
+
+# 단위 테스트 및 커버리지 측정
+pytest --cov=opinet --cov-fail-under=90
+
+# 실제 API 스모크 테스트 (필요시)
+pytest -m live --run-live
+```
+
+- HTTP mocking 테스트는 `respx`로 `httpx` 호출을 재생합니다.
+- 좌표 변환 자체와 요청/응답 모델 경계는 `python-opinet-api` 테스트에서 검증합니다.
+- 타입 변환 테스트는 정상값, 빈 문자열/공백/None, 잘못된 포맷을 모두 포함해야 합니다.
+
+## 작업 후 체크리스트
+
+- [ ] `python -m compileall src/opinet tests` 통과
+- [ ] `python -m mypy src/opinet` 타입 검사 통과
+- [ ] `pytest --cov=opinet --cov-fail-under=90` 단위 테스트 및 커버리지 충족
+- [ ] 변경된 소스 및 추가 설정 파일 확인
+- [ ] `docs/implementation-status.md` 또는 관련 명세 문서의 변경 상태 반영
+- [ ] 작업 후 `CHANGELOG.md` 갱신 (사용자 가시 변경이 있을 때)
+- [ ] PR 생성 및 승인 후 main 브랜치로 머지
+- [ ] `git push origin main`으로 원격 리포지토리에 반영 완료
 
 ## 반복 실수 방지
 - `StationDetail`의 전화번호 필드는 `tel`이다. `phone`을 새로 만들지 않는다.
