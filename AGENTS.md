@@ -61,8 +61,8 @@
 
 ## 에이전트 worktree + CodeGraph
 
-- 에이전트 운용 환경에 따라 `F:\dev\python-opinet-api`를 기본 작업 공간으로 삼습니다. 필요 시 에이전트별로 `opinet-antigravity`, `opinet-claude`, `opinet-codex` 고정 worktree를 구축하여 사용할 수 있습니다.
-- 새 작업은 해당 worktree/저장소에서 `git fetch` 후 `git switch -c agent/<topic> main`으로 브랜치를 새로 생성하여 시작합니다.
+- 에이전트별 전용 고정 작업 공간으로 `F:\dev\python-opinet-api-antigravity` (Google Antigravity), `F:\dev\python-opinet-api-claude` (Claude Code), `F:\dev\python-opinet-api-codex` (ChatGPT Codex)를 운용합니다.
+- 새 작업은 해당 에이전트 worktree에서 `git fetch` 후 `git switch -c agent/<topic> main`으로 브랜치를 새로 생성하여 시작합니다.
 - CodeGraph는 작업 공간마다 1회 `codegraph init -i`로 초기화하고 이후에는 `codegraph sync`를 실행해 최신화 상태를 유지합니다. `.codegraph/` 폴더는 gitignore 대상입니다.
 - 에이전트별 MCP 설정 파일(`antigravity.json`, `claude.json`, `codex.json`)과 로컬 설정은 루트 및 `.gemini/mcp.json`, `.claude/settings.local.json`, `.codex/config.toml`에 각각 존재합니다.
 
