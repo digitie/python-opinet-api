@@ -26,9 +26,10 @@ You are helping build/maintain a Python client for the Korean **Opinet** free fu
 
 ## Local tooling invariants
 
-1. 이 Windows/PowerShell 환경에서는 `rg`가 실행 권한 문제로 실패할 수 있다. 실패하면 반복 시도하지 말고 `git ls-files`, `Get-ChildItem -Recurse -File`, `Select-String`을 사용한다.
-2. 한글 Markdown/Python 파일을 PowerShell에서 읽을 때는 `Get-Content -Encoding utf8` 또는 `Get-Content -Raw -Encoding utf8`을 사용한다.
-3. PowerShell 기본 출력에서 한글이 깨져 보이면 파일 손상으로 간주하지 말고 UTF-8 인코딩을 명시해서 재확인한다.
+1. 이 worktree에서는 Linux `git` 대신 Windows Git executable(`git.exe`)을 사용한다. 예: `git.exe -C F:\dev\python-opinet-api-codex status`
+2. 이 Windows/PowerShell 환경에서는 `rg`가 실행 권한 문제로 실패할 수 있다. 실패하면 반복 시도하지 말고 `git ls-files`, `Get-ChildItem -Recurse -File`, `Select-String`을 사용한다.
+3. 한글 Markdown/Python 파일을 PowerShell에서 읽을 때는 `Get-Content -Encoding utf8` 또는 `Get-Content -Raw -Encoding utf8`을 사용한다.
+4. PowerShell 기본 출력에서 한글이 깨져 보이면 파일 손상으로 간주하지 말고 UTF-8 인코딩을 명시해서 재확인한다.
 
 ## Shared-library reuse invariants
 

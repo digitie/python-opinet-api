@@ -88,6 +88,7 @@
 - API 필드명, 엔드포인트, enum 값, 외부 오류 메시지처럼 원문 자체가 의미 있는 값은 그대로 둔다.
 
 ## 로컬 도구/인코딩 규칙
+- 이 worktree에서는 Linux `git` 대신 Windows Git executable(`git.exe`)을 사용한다. 예: `git.exe -C F:\dev\python-opinet-api-codex status`.
 - 이 환경에서 `rg` 실행이 `Access is denied`로 실패할 수 있다. 같은 실패를 반복하지 말고 `git ls-files`, `Get-ChildItem -Recurse -File`, `Select-String`으로 우회한다.
 - 한글 문서나 소스 파일을 PowerShell에서 읽을 때는 기본 출력 인코딩을 믿지 말고 `Get-Content -Encoding utf8` 또는 `Get-Content -Raw -Encoding utf8`을 사용한다.
 - 깨진 한글 출력이 보이면 파일 내용이 깨졌다고 판단하지 말고 먼저 UTF-8 인코딩을 명시해서 다시 확인한다.
