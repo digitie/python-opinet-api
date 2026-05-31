@@ -5,6 +5,7 @@ __pycache__/
 .mypy_cache/
 .coverage
 htmlcov/
+.codegraph/
 .venv/
 venv/
 dist/
