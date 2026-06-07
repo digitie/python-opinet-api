@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-import os
+import math
+from collections.abc import AsyncIterator, Iterator
 from datetime import date, time
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -195,6 +196,48 @@ def _coordinate_query_params(
         return validate_katec_xy(katec_x, katec_y)
     except ValueError as exc:
         raise OpinetInvalidParameterError(str(exc)) from exc
+
+
+_METERS_PER_DEGREE_LAT = 111_320.0
+"""위도 1도당 대략적인 거리(m). bbox grid 간격 계산용 근사."""
+
+
+def _bbox_grid_centers(
+    *,
+    min_lon: float,
+    min_lat: float,
+    max_lon: float,
+    max_lat: float,
+    radius_m: int,
+) -> Iterator[tuple[float, float]]:
+    """WGS84 bbox를 반경 ``radius_m`` 원으로 빈틈없이 덮는 격자 중심점을 생성한다.
+
+    ``iter_stations_in_bbox`` 근사 enumeration용. 인접 원이 격자 셀 모서리까지
+    덮도록 중심 간격을 ``radius_m * √2``로 둔다(정사각 격자에서 셀 모서리까지의
+    거리 = 간격/√2 = ``radius_m``). 경도 간격은 bbox 중앙 위도의 ``cos`` 보정을
+    적용한다. 마지막 행/열은 ``max`` 경계를 넘기도록 한 칸 더 생성해 경계 부근
+    누락을 막는다(좌표는 (lon, lat) 순서).
+    """
+    if min_lon > max_lon or min_lat > max_lat:
+        raise OpinetInvalidParameterError("bbox min 좌표는 max 좌표 이하이어야 한다")
+    if not 1 <= radius_m <= 5000:
+        raise OpinetInvalidParameterError("radius_m must be between 1 and 5000")
+
+    spacing_m = radius_m * math.sqrt(2.0)
+    lat_step = spacing_m / _METERS_PER_DEGREE_LAT
+    mid_lat = (min_lat + max_lat) / 2.0
+    meters_per_degree_lon = _METERS_PER_DEGREE_LAT * math.cos(math.radians(mid_lat))
+    if meters_per_degree_lon <= 1.0:  # 극단 위도 방어(0 division/과도한 step)
+        lon_step = (max_lon - min_lon) or lat_step
+    else:
+        lon_step = spacing_m / meters_per_degree_lon
+
+    lat_count = max(1, math.ceil((max_lat - min_lat) / lat_step))
+    lon_count = max(1, math.ceil((max_lon - min_lon) / lon_step))
+    for i in range(lat_count + 1):
+        lat = min_lat + i * lat_step
+        for j in range(lon_count + 1):
+            yield (min_lon + j * lon_step, lat)
 
 
 class OpinetClient:
@@ -440,6 +483,57 @@ class OpinetClient:
         self._handle_empty(parsed, endpoint)
         return parsed
 
+    def iter_stations_in_bbox(
+        self,
+        *,
+        min_lon: float,
+        min_lat: float,
+        max_lon: float,
+        max_lat: float,
+        radius_m: int = 5000,
+        prodcd: ProductCode | str = ProductCode.GASOLINE,
+        sort: SortOrder | str = SortOrder.PRICE,
+    ) -> Iterator[Station]:
+        """WGS84 bbox 내 주유소를 ``uni_id`` 기준 중복 제거하며 순회한다(근사 enumeration).
+
+        **OpiNet OpenAPI에는 지역/전국 단위 주유소 목록(bulk) 엔드포인트가 없다**
+        (공개 5종: ``aroundAll``/``lowTop10``/``detailById``/``areaCode``/
+        ``avgAllPrice``). 따라서 본 메서드는 반경 ≤5km ``search_stations_around``을
+        bbox 전체에 격자(``_bbox_grid_centers``)로 호출하고 ``uni_id`` 기준 dedup해
+        근사 목록을 stream한다. 빈 격자 셀(``OpinetNoDataError``)은 건너뛴다.
+
+        주의:
+        - **호출 수가 면적에 비례해 급증한다.** 예: 전국(약 1000km×550km)을
+          ``radius_m=5000``으로 덮으면 ~1만+ 회 호출 → OpiNet 일일 쿼터/ToS 위협.
+          시군구 등 **bounded 영역**에 쓰는 것을 권장한다. rate-limit/쿼터는 호출
+          측 책임이다.
+        - ``aroundAll``은 ``tel``/``lpg_yn``(주유소 유형)을 주지 않는다. 이 필드가
+          필요하면 ``uni_id``로 ``get_station_detail``을 별도 호출(N+1)해야 한다.
+        """
+        seen: set[str] = set()
+        for center_lon, center_lat in _bbox_grid_centers(
+            min_lon=min_lon,
+            min_lat=min_lat,
+            max_lon=max_lon,
+            max_lat=max_lat,
+            radius_m=radius_m,
+        ):
+            try:
+                stations = self.search_stations_around(
+                    lon=center_lon,
+                    lat=center_lat,
+                    radius_m=radius_m,
+                    prodcd=prodcd,
+                    sort=sort,
+                )
+            except OpinetNoDataError:
+                continue
+            for station in stations:
+                if station.uni_id in seen:
+                    continue
+                seen.add(station.uni_id)
+                yield station
+
     def resolve_sigungu_bjd_code(
         self,
         sigungu_code: str,
@@ -681,3 +775,44 @@ class AsyncOpinetClient:
         parsed = self._parser._parse_area_codes_response(await self._require_http().get(endpoint, params=params))
         self._parser._handle_empty(parsed, endpoint)
         return parsed
+
+    async def iter_stations_in_bbox(
+        self,
+        *,
+        min_lon: float,
+        min_lat: float,
+        max_lon: float,
+        max_lat: float,
+        radius_m: int = 5000,
+        prodcd: ProductCode | str = ProductCode.GASOLINE,
+        sort: SortOrder | str = SortOrder.PRICE,
+    ) -> AsyncIterator[Station]:
+        """WGS84 bbox 내 주유소를 ``uni_id`` 기준 dedup하며 순회한다(근사 enumeration).
+
+        sync ``OpinetClient.iter_stations_in_bbox``의 async 버전. OpiNet은 지역/전국
+        bulk 엔드포인트가 없어 ``aroundAll``(반경 ≤5km)을 bbox 격자로 호출+dedup한다.
+        호출 수·쿼터 주의와 ``tel``/``lpg_yn`` 부재(detail N+1 필요)는 sync 버전과 동일.
+        """
+        seen: set[str] = set()
+        for center_lon, center_lat in _bbox_grid_centers(
+            min_lon=min_lon,
+            min_lat=min_lat,
+            max_lon=max_lon,
+            max_lat=max_lat,
+            radius_m=radius_m,
+        ):
+            try:
+                stations = await self.search_stations_around(
+                    lon=center_lon,
+                    lat=center_lat,
+                    radius_m=radius_m,
+                    prodcd=prodcd,
+                    sort=sort,
+                )
+            except OpinetNoDataError:
+                continue
+            for station in stations:
+                if station.uni_id in seen:
+                    continue
+                seen.add(station.uni_id)
+                yield station
