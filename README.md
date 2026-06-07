@@ -168,6 +168,35 @@ asyncio.run(main())
 
 상세 명세는 [`opinet-api.md`](./opinet-api.md) 참조.
 
+### 지역/전국 enumeration (bulk) — 근사 격자 순회
+
+> **OpiNet OpenAPI에는 지역(시도/시군구)·전국 단위 주유소 목록(bulk) 엔드포인트가 없습니다.**
+> 공개 5종 중 station을 주는 것은 `aroundAll`(반경 ≤5km)·`lowTop10`(최저가 Top 20)·
+> `detailById`(uni_id 단건)뿐이며, `areaCode`는 코드만, `avg*`는 가격 집계만 반환합니다.
+> PDF 가이드북의 미검증 17종도 모두 가격 집계/이름검색이라 enumeration이 불가합니다.
+
+그래서 `iter_stations_in_bbox()`는 bbox를 `aroundAll` 반경 원으로 빈틈없이 덮는 **격자**로
+호출하고 `uni_id` 기준 중복 제거해 **근사 enumeration**을 제공합니다.
+
+```python
+# 시군구 등 bounded 영역 권장 (좌표는 WGS84)
+for station in client.iter_stations_in_bbox(
+    min_lon=127.00, min_lat=37.46, max_lon=127.14, max_lat=37.55, radius_m=5000
+):
+    print(station.uni_id, station.name, station.lon, station.lat)
+```
+
+| 메서드 | 기반 | 반환 |
+|---|---|---|
+| `iter_stations_in_bbox()` / `AsyncOpinetClient.iter_stations_in_bbox()` | `aroundAll.do` 격자 + dedup | `Iterator[Station]` / `AsyncIterator[Station]` |
+
+**주의:**
+- **호출 수가 면적에 비례해 급증합니다.** 전국(약 1000km×550km)을 `radius_m=5000`으로 덮으면
+  ~1만+ 회 호출 → OpiNet 일일 쿼터/ToS를 위협합니다. 시군구 등 bounded 영역에 쓰세요.
+  rate-limit/쿼터는 호출 측 책임입니다.
+- `aroundAll`은 `tel`/`station_type(lpg_yn)`을 주지 않습니다. 이 필드가 필요하면 `uni_id`로
+  `get_station_detail()`을 별도 호출(N+1)하세요.
+
 ### API 카탈로그와 디버그 UI
 
 디버그 UI나 외부 도구가 API 목록을 하드코딩하지 않도록 공식 5개 API 카탈로그를 제공합니다. 각 항목에는 함수명, 엔드포인트, 데이터셋 식별자, 사람이 읽기 쉬운 데이터셋명, 파라미터 설명, 서비스키 발급 링크가 들어 있습니다.
