@@ -120,3 +120,29 @@ def test_live_official_endpoints_parse_when_key_returns_data(live_client):
     assert isinstance(detail, StationDetail)
     assert detail.uni_id == lowest[0].uni_id
     assert isinstance(detail.prices, tuple)
+
+
+def test_live_iter_stations_in_bbox_enumerates_and_dedupes(live_client):
+    """근사 격자 enumeration이 실서버에서 여러 셀을 순회하며 uni_id로 dedup한다."""
+    # 강남역 일대 작은 bbox + 반경 2km → aroundAll 격자가 여러 셀로 나뉜다.
+    stations = list(
+        live_client.iter_stations_in_bbox(
+            min_lon=127.02,
+            min_lat=37.49,
+            max_lon=127.05,
+            max_lat=37.51,
+            radius_m=2000,
+            prodcd=ProductCode.GASOLINE,
+        )
+    )
+    _skip_if_empty(stations, "aroundAll.do (iter_stations_in_bbox)")
+
+    assert all(isinstance(row, Station) for row in stations)
+
+    uni_ids = [row.uni_id for row in stations]
+    assert all(uni_ids)
+    # 격자 셀이 겹쳐 같은 주유소를 여러 번 만나도 최종 결과는 uni_id 기준 고유해야 한다.
+    assert len(uni_ids) == len(set(uni_ids))
+
+    # bbox는 좌표 검색 결과이므로 좌표가 반드시 채워져야 한다.
+    assert all(row.lon is not None and row.lat is not None for row in stations)
