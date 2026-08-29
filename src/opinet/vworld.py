@@ -14,9 +14,11 @@ from .models import AreaCode
 
 _VworldNoDataError: type[Exception] | None
 try:
-    from vworld.exceptions import VworldNoDataError as _VworldNoDataError
+    from vworld.exceptions import VworldNoDataError  # type: ignore[import-not-found]
 except ImportError:
     _VworldNoDataError = None
+else:
+    _VworldNoDataError = VworldNoDataError
 
 
 class _OpinetAreaClient(Hashable, Protocol):
