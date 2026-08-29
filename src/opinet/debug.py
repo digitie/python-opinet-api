@@ -11,17 +11,16 @@ from datetime import date, datetime, time
 from enum import Enum
 from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
-from types import MappingProxyType
 from typing import Any
 from zoneinfo import ZoneInfo
 
 from pydantic import BaseModel
 
 from ._http import _OpinetHttp
-from .catalog import ApiCatalogItem, get_api_catalog_item
+from .catalog import ApiCatalogItem, ApiParameter, get_api_catalog_item
 from .client import OpinetClient, _coerce_product_code, _coerce_sort_order, _coordinate_query_params, _validate_area_param
 from .codes import ProductCode, SortOrder
-from .exceptions import OpinetInvalidParameterError
+from .exceptions import OpinetError, OpinetInvalidParameterError
 
 SENSITIVE_KEYS = frozenset(
     {
@@ -41,17 +40,16 @@ DEFAULT_ASSERTION: dict[str, Any] = {
     "required_fields": [],
 }
 
-ENDPOINT_BY_FUNCTION = MappingProxyType(
-    {
-        "get_national_average_price": "avgAllPrice.do",
-        "get_lowest_price_top20": "lowTop10.do",
-        "search_stations_around": "aroundAll.do",
-        "get_station_detail": "detailById.do",
-        "get_area_codes": "areaCode.do",
-    }
+# fixture replay(parse_debug_response)가 raw response body를 어떤 private parser로
+# 되돌릴지 결정하는 표에 쓰인다. 실행 중(debug_fetch)에는 카탈로그의
+# ``ApiCatalogItem.endpoint``를 직접 쓰므로 별도 endpoint 매핑이 필요 없다.
+SUPPORTED_DEBUG_FUNCTIONS = (
+    "get_national_average_price",
+    "get_lowest_price_top20",
+    "search_stations_around",
+    "get_station_detail",
+    "get_area_codes",
 )
-
-SUPPORTED_DEBUG_FUNCTIONS = tuple(ENDPOINT_BY_FUNCTION)
 
 
 @dataclass(frozen=True, slots=True)
@@ -270,7 +268,10 @@ def parse_debug_response(
 
 def process_debug_result(function_name: str, parsed: Any) -> Any:
     """파싱된 모델을 normalized processed 결과로 변환한다."""
-    endpoint = _endpoint_for(function_name)
+    try:
+        endpoint = get_api_catalog_item(function_name=function_name).endpoint
+    except KeyError as exc:
+        raise ValueError(f"Unknown debug function: {function_name}") from exc
     if isinstance(parsed, list):
         return [item.to_normalized(endpoint=endpoint) if hasattr(item, "to_normalized") else item for item in parsed]
     if hasattr(parsed, "to_normalized"):
@@ -344,11 +345,142 @@ def assert_case(actual: Any, expected: Any, assertion: MappingABC[str, Any] | No
     raise ValueError(f"Unknown assertion mode: {mode}")
 
 
+class _RecordingTransport:
+    """실제 transport로 위임하면서 각 ``get()`` 호출을 기록하는 얇은 proxy.
+
+    ``debug_fetch()``가 공개 client 메서드를 그대로 호출하면서도 Debug Trace/
+    Fixture 탭에 보여줄 실제 요청/응답을 얻기 위해 쓴다. ``_OpinetHttp``는
+    ``slots=True`` dataclass라 인스턴스 메서드를 monkeypatch할 수 없어 이 proxy로
+    ``OpinetClient._http``를 통째로 바꿔치기하는 방식을 쓴다.
+    """
+
+    def __init__(self, inner: Any, calls: list[dict[str, Any]]) -> None:
+        self._inner = inner
+        self._calls = calls
+
+    def get(self, endpoint: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
+        body = self._inner.get(endpoint, params=params)
+        self._calls.append(
+            {
+                "endpoint": endpoint,
+                "params": dict(params) if params else {},
+                "status_code": getattr(self._inner, "_last_status_code", None),
+                "body": body,
+            }
+        )
+        return body
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._inner, name)
+
+
 class OpinetDebugClient:
     """공식 클라이언트 실행 결과를 DebugRun 형태로 수집하는 래퍼."""
 
     def __init__(self, client: OpinetClient) -> None:
         self._client = client
+
+    def debug_fetch(
+        self,
+        function_name: str,
+        params: MappingABC[str, Any] | None = None,
+        *,
+        raise_errors: bool = False,
+    ) -> DebugRun:
+        """카탈로그 메타데이터만으로 임의의 공식 API를 실행하고 디버그 결과를 반환한다.
+
+        Streamlit 디버그 UI의 유일한 실행 진입점이다. ``function_name``에 대한
+        ``if``/``elif`` 분기 없이 ``get_api_catalog_item()``의 파라미터 메타데이터로
+        입력값을 타입 변환하고, ``getattr(self._client, function_name)`` reflection으로
+        실제 공개 client 메서드를 호출해 좌표 변환·enum 강제·범위 검증 등 기존 로직을
+        그대로 재사용한다. 새 API를 카탈로그에 추가해도 이 메서드는 수정할 필요가 없다.
+        """
+        catalog_item = get_api_catalog_item(function_name=function_name)
+        raw_params = dict(params or {})
+        input_data = redact_sensitive(jsonable(raw_params))
+        trace: list[str] = [
+            f"catalog selected: {catalog_item.dataset_name} ({catalog_item.endpoint})",
+            f"service key url: {catalog_item.service_key_url}",
+        ]
+
+        method = getattr(self._client, function_name, None)
+        if method is None or not callable(method):
+            exc: Exception = ValueError(f"unknown debug function: {function_name}")
+            if raise_errors:
+                raise exc
+            trace.append(f"failed: {type(exc).__name__}")
+            return DebugRun(
+                function=function_name,
+                input=input_data,
+                request={},
+                response={},
+                parsed=None,
+                processed=None,
+                trace=tuple(trace),
+                catalog_item=catalog_item,
+                error=_error_dict(exc),
+            )
+
+        try:
+            real_http = self._client._require_http()
+        except Exception as exc:
+            if raise_errors:
+                raise
+            trace.append(f"transport unavailable: {type(exc).__name__}")
+            return DebugRun(
+                function=function_name,
+                input=input_data,
+                request={},
+                response={},
+                parsed=None,
+                processed=None,
+                trace=tuple(trace),
+                catalog_item=catalog_item,
+                error=_error_dict(exc),
+            )
+
+        # ``_OpinetHttp``는 ``slots=True`` dataclass라 인스턴스에 새 속성을 못 붙인다.
+        # 그래서 메서드를 monkeypatch하는 대신 client의 transport 자체를 요청 동안만
+        # 기록용 얇은 proxy로 바꿔치기한다(원본은 finally에서 항상 복원).
+        calls: list[dict[str, Any]] = []
+        self._client._http = _RecordingTransport(real_http, calls)  # type: ignore[assignment]
+        try:
+            coerced = _coerce_debug_params(catalog_item, raw_params)
+            trace.append(f"coerced params: {sorted(coerced)}" if coerced else "no request parameters")
+            parsed = method(**coerced)
+            trace.append("received parsed response from client method")
+            processed = process_debug_result(function_name, parsed)
+            trace.append("converted parsed result into normalized records")
+        except Exception as exc:
+            if raise_errors:
+                raise
+            trace.append(f"failed: {type(exc).__name__}")
+            request, response = _snapshot_from_calls(calls)
+            return DebugRun(
+                function=function_name,
+                input=input_data,
+                request=request,
+                response=response,
+                parsed=None,
+                processed=None,
+                trace=tuple(trace),
+                catalog_item=catalog_item,
+                error=_error_dict(exc),
+            )
+        finally:
+            self._client._http = real_http
+
+        request, response = _snapshot_from_calls(calls)
+        return DebugRun(
+            function=function_name,
+            input=input_data,
+            request=request,
+            response=response,
+            parsed=parsed,
+            processed=processed,
+            trace=tuple(trace),
+            catalog_item=catalog_item,
+        )
 
     def get_national_average_price(self, *, raise_errors: bool = False) -> DebugRun:
         """전국 평균가 API를 실행하고 디버그 결과를 반환한다."""
@@ -473,8 +605,8 @@ class OpinetDebugClient:
         params: dict[str, Any] | None,
         raise_errors: bool,
     ) -> DebugRun:
-        endpoint = _endpoint_for(function_name)
         catalog_item = get_api_catalog_item(function_name=function_name)
+        endpoint = catalog_item.endpoint
         request = _request_snapshot(endpoint, params)
         trace: list[str] = [
             f"catalog selected: {catalog_item.dataset_name} ({catalog_item.endpoint})",
@@ -528,12 +660,11 @@ class OpinetDebugClient:
     ) -> DebugRun:
         if raise_errors:
             raise exc
-        endpoint = _endpoint_for(function_name)
         catalog_item = get_api_catalog_item(function_name=function_name)
         return DebugRun(
             function=function_name,
             input=redact_sensitive(jsonable(input_data)),
-            request=_request_snapshot(endpoint, params),
+            request=_request_snapshot(catalog_item.endpoint, params),
             response={},
             parsed=None,
             processed=None,
@@ -545,13 +676,6 @@ class OpinetDebugClient:
             catalog_item=catalog_item,
             error=_error_dict(exc),
         )
-
-
-def _endpoint_for(function_name: str) -> str:
-    try:
-        return ENDPOINT_BY_FUNCTION[function_name]
-    except KeyError as exc:
-        raise ValueError(f"Unknown debug function: {function_name}") from exc
 
 
 def _request_snapshot(endpoint: str, params: dict[str, Any] | None) -> dict[str, Any]:
@@ -566,12 +690,63 @@ def _request_snapshot(endpoint: str, params: dict[str, Any] | None) -> dict[str,
     }
 
 
+def _coerce_debug_params(catalog_item: ApiCatalogItem, params: MappingABC[str, Any]) -> dict[str, Any]:
+    """``debug_fetch``에 들어온 raw 입력값을 카탈로그 ``kind`` 메타데이터로 타입 변환한다.
+
+    빈 값/``None``은 결과 dict에서 빠진다(대상 client 메서드 자체의 기본값이 적용된다).
+    카탈로그에 없는 이름(Extra params escape hatch로 들어온 값)은 이미 JSON으로 타입이
+    정해져 있다고 보고 그대로 전달한다.
+    """
+    param_by_name: dict[str, ApiParameter] = {parameter.name: parameter for parameter in catalog_item.parameters}
+    coerced: dict[str, Any] = {}
+    for name, raw_value in params.items():
+        spec = param_by_name.get(name)
+        value = _coerce_param_value(raw_value, spec.kind if spec is not None else "string")
+        if value is not None:
+            coerced[name] = value
+    return coerced
+
+
+def _coerce_param_value(raw_value: Any, kind: str) -> Any:
+    if raw_value is None:
+        return None
+    if isinstance(raw_value, str):
+        text = raw_value.strip()
+        if not text:
+            return None
+        raw_value = text
+    if kind == "integer" and not isinstance(raw_value, int):
+        return int(str(raw_value))
+    if kind == "float" and not isinstance(raw_value, int | float):
+        return float(str(raw_value))
+    return raw_value
+
+
+def _snapshot_from_calls(calls: list[dict[str, Any]]) -> tuple[dict[str, Any], dict[str, Any]]:
+    """recording으로 붙잡은 마지막 HTTP 호출을 request/response 스냅샷으로 만든다."""
+    if not calls:
+        return {}, {}
+    last = calls[-1]
+    request = _request_snapshot(last["endpoint"], last["params"])
+    response = {"status_code": last["status_code"], "headers": {}, "body": last["body"]}
+    return request, response
+
+
 def _error_dict(exc: Exception) -> dict[str, Any]:
-    return {
+    """예외를 Validation Errors 탭에 표시할 구조화 dict로 변환한다.
+
+    ``OpinetError`` 계열이면 ``status_code``/``headers``도 함께 담는다. 마지막에
+    ``redact_sensitive``를 통과시켜 헤더 등에 인증정보가 남지 않게 한다.
+    """
+    payload: dict[str, Any] = {
         "type": type(exc).__name__,
         "message": str(exc),
         "traceback": "".join(traceback.format_exception(type(exc), exc, exc.__traceback__)),
     }
+    if isinstance(exc, OpinetError):
+        payload["status_code"] = exc.status_code
+        payload["headers"] = dict(exc.headers) if exc.headers is not None else None
+    return dict(redact_sensitive(payload))
 
 
 def _installed_version() -> str | None:

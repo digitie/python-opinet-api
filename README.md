@@ -240,11 +240,11 @@ print(run.dataset_name)       # 오피넷 시도/시군구 코드
 print(run.trace_payload)      # Debug Trace 탭 표시용 payload
 ```
 
-Streamlit 예제는 `examples/streamlit_debug_app.py`에 있습니다. 라이브러리 본체는 Streamlit에 의존하지 않으며, 예제 앱은 API 선택 시 카탈로그 항목과 서비스키 발급 링크를 함께 표시합니다.
+Streamlit 예제는 `examples/streamlit_debug_ui.py`에 있습니다. 라이브러리 본체는 Streamlit에 의존하지 않으며, 예제 앱은 API 선택 시 카탈로그 항목과 서비스키 발급 링크를 함께 표시합니다.
 
 ```bash
-pip install streamlit
-streamlit run examples/streamlit_debug_app.py
+pip install -e ".[debug-ui]"
+streamlit run examples/streamlit_debug_ui.py
 ```
 
 fixture 생성/replay 설계는 [`docs/debug-fixture-workflow.md`](./docs/debug-fixture-workflow.md)에 정리되어 있습니다.
@@ -600,7 +600,7 @@ python -m mypy src/opinet
 │   ├── decisions.md
 │   └── implementation-status.md
 ├── examples/
-│   └── streamlit_debug_app.py
+│   └── streamlit_debug_ui.py
 ├── src/
 │   └── opinet/          # 라이브러리 소스, import 이름은 opinet
 │       ├── __init__.py

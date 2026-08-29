@@ -30,9 +30,9 @@ REST API 디버그 UI 설계안에 맞춰 라이브러리 본체에 Streamlit �
 | DebugRun | `src/opinet/debug.py`의 `DebugRun`이 input, request, response, parsed, processed, trace, catalog item, error를 보관 |
 | fixture 저장 | `save_fixture()`, `save_debug_fixture()`가 `tests/fixtures/{function}/{case}.json` 형식으로 저장 |
 | replay 테스트 | `tests/test_generated_fixtures.py`가 하위 디렉터리 fixture를 네트워크 없이 재파싱/비교 |
-| 예제 UI | `examples/streamlit_debug_app.py`가 카탈로그 선택, 서비스키 링크, Debug Trace 탭 표시를 검증하는 참고 앱 |
+| 예제 UI | `examples/streamlit_debug_ui.py`가 카탈로그 기반 파라미터 폼, 서비스키 링크, 6개 고정 탭(Raw Response/Pydantic Model/Processed Result/Validation Errors/Debug Trace/Fixture)을 검증하는 참고 앱 |
 
-라이브러리 런타임 의존성에는 Streamlit을 추가하지 않았습니다. 화면 앱은 별도 UI 프로젝트나 `examples/streamlit_debug_app.py`에서 선택적으로 설치해 실행합니다.
+라이브러리 런타임 의존성에는 Streamlit을 추가하지 않았습니다. 화면 앱은 `pip install -e ".[debug-ui]"`(`pyproject.toml`의 `debug-ui` extra)로 선택적으로 설치해 `examples/streamlit_debug_ui.py`를 실행합니다.
 
 ## 구현 원칙
 

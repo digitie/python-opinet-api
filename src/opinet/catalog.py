@@ -5,12 +5,21 @@ from __future__ import annotations
 from dataclasses import dataclass, fields, is_dataclass
 from typing import Any, Literal
 
+from .codes import ProductCode, SortOrder
+
 SERVICE_KEY_URL = "https://www.opinet.co.kr/user/custapi/openApiNew.do"
+
+ParamKind = Literal["string", "integer", "float", "enum"]
+"""디버그 UI가 위젯을 자동 생성할 때 쓰는 파라미터 타입 태그.
+
+``function_name``별로 분기하지 않고 이 값 하나로 어떤 입력 위젯(``text_input``/
+``number_input``/``selectbox``)을 그릴지 결정한다.
+"""
 
 
 @dataclass(frozen=True, slots=True)
 class ApiParameter:
-    """API 파라미터 설명."""
+    """API 파라미터 설명. 디버그 UI가 이 메타데이터만으로 입력 위젯을 생성한다."""
 
     name: str
     label: str
@@ -18,6 +27,7 @@ class ApiParameter:
     description: str
     default: Any = None
     allowed_values: tuple[str, ...] = ()
+    kind: ParamKind = "string"
 
 
 @dataclass(frozen=True, slots=True)
@@ -46,6 +56,9 @@ class ApiCatalogItem:
         return _dataclass_to_dict(self)
 
 
+_PRODUCT_CODE_VALUES: tuple[str, ...] = tuple(code.value for code in ProductCode)
+_SORT_ORDER_VALUES: tuple[str, ...] = tuple(order.value for order in SortOrder)
+
 API_CATALOG: tuple[ApiCatalogItem, ...] = (
     ApiCatalogItem(
         function_name="get_national_average_price",
@@ -73,7 +86,8 @@ API_CATALOG: tuple[ApiCatalogItem, ...] = (
                 label="제품 코드",
                 required=True,
                 description="B027/B034/D047/C004/K015 중 하나",
-                allowed_values=("B027", "B034", "D047", "C004", "K015"),
+                allowed_values=_PRODUCT_CODE_VALUES,
+                kind="enum",
             ),
             ApiParameter(
                 name="cnt",
@@ -81,12 +95,14 @@ API_CATALOG: tuple[ApiCatalogItem, ...] = (
                 required=False,
                 description="1~20 사이의 결과 건수",
                 default=10,
+                kind="integer",
             ),
             ApiParameter(
                 name="area",
                 label="지역 코드",
                 required=False,
                 description="오피넷 시도 2자리 또는 시군구 4자리 코드",
+                kind="string",
             ),
         ),
     ),
@@ -105,24 +121,28 @@ API_CATALOG: tuple[ApiCatalogItem, ...] = (
                 label="WGS84 경도",
                 required=False,
                 description="lat과 함께 지정. KATEC 좌표와 둘 중 하나만 지정",
+                kind="float",
             ),
             ApiParameter(
                 name="lat",
                 label="WGS84 위도",
                 required=False,
                 description="lon과 함께 지정. KATEC 좌표와 둘 중 하나만 지정",
+                kind="float",
             ),
             ApiParameter(
                 name="katec_x",
                 label="KATEC 좌표",
                 required=False,
                 description="katec_y와 함께 지정. WGS84 좌표와 둘 중 하나만 지정",
+                kind="float",
             ),
             ApiParameter(
                 name="katec_y",
                 label="KATEC 좌표",
                 required=False,
                 description="katec_x와 함께 지정. WGS84 좌표와 둘 중 하나만 지정",
+                kind="float",
             ),
             ApiParameter(
                 name="radius_m",
@@ -130,6 +150,7 @@ API_CATALOG: tuple[ApiCatalogItem, ...] = (
                 required=False,
                 description="1~5000m",
                 default=5000,
+                kind="integer",
             ),
             ApiParameter(
                 name="prodcd",
@@ -137,7 +158,8 @@ API_CATALOG: tuple[ApiCatalogItem, ...] = (
                 required=False,
                 description="B027/B034/D047/C004/K015 중 하나",
                 default="B027",
-                allowed_values=("B027", "B034", "D047", "C004", "K015"),
+                allowed_values=_PRODUCT_CODE_VALUES,
+                kind="enum",
             ),
             ApiParameter(
                 name="sort",
@@ -145,7 +167,8 @@ API_CATALOG: tuple[ApiCatalogItem, ...] = (
                 required=False,
                 description="1=가격순, 2=거리순",
                 default="1",
-                allowed_values=("1", "2"),
+                allowed_values=_SORT_ORDER_VALUES,
+                kind="enum",
             ),
         ),
     ),

@@ -17,6 +17,7 @@
 | 항목 | 역할 |
 |---|---|
 | `OpinetClient.debug()` | `OpinetDebugClient` 래퍼 반환 |
+| `OpinetClient.debug_fetch(function_name, params)` / `OpinetDebugClient.debug_fetch(...)` | 카탈로그 파라미터 메타데이터만으로 임의의 공식 API를 실행하는 제네릭 진입점. `function_name`별 분기 없이 `getattr` reflection으로 실제 공개 메서드를 호출한다. Streamlit UI가 쓰는 방식이다 |
 | `DebugRun` | function, input, request, response, parsed, processed, trace, catalog item, error 보관 |
 | `get_api_catalog()` | 공식 5개 API 카탈로그 반환 |
 | `get_api_catalog_options()` | Streamlit selectbox 등에 쓰기 좋은 label/value 목록 반환 |
@@ -155,9 +156,9 @@ Streamlit 프로젝트를 별도 패키지로 만들 때는 다음 경계를 지
 - Fixture/Testcase 탭은 case name, description, assertion mode, exclude fields, required fields, overwrite 설정을 받아 `tests/fixtures/{function}/{case}.json`으로 저장합니다.
 - Copy pytest code는 보조 기능으로만 둡니다. 기본 회귀 테스트는 parametrize runner 방식입니다.
 
-이 저장소에는 바로 참고할 수 있는 선택형 예제 `examples/streamlit_debug_app.py`가 있습니다. 예제는 Raw/Parsed/Processed/Error/Debug Trace/Fixture 탭을 제공하지만, Streamlit은 라이브러리 런타임 의존성이 아니므로 별도 UI 환경에서 설치해 실행합니다.
+이 저장소에는 바로 참고할 수 있는 선택형 예제 `examples/streamlit_debug_ui.py`가 있습니다. 예제는 Raw Response/Pydantic Model/Processed Result/Validation Errors/Debug Trace/Fixture 탭을 제공하지만, Streamlit은 라이브러리 런타임 의존성이 아니므로 `debug-ui` extra로 별도 설치해 실행합니다.
 
 ```bash
-pip install streamlit
-streamlit run examples/streamlit_debug_app.py
+pip install -e ".[debug-ui]"
+streamlit run examples/streamlit_debug_ui.py
 ```
