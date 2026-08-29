@@ -409,10 +409,6 @@ class OpinetClient:
                 raise OpinetServerError(f"{endpoint}: AREA_CD and AREA_NM are required")
             if len(code) not in (2, 4) or not code.isdigit():
                 raise OpinetServerError(f"{endpoint}: AREA_CD must be a 2-digit sido or 4-digit sigungu code")
-            try:
-                opinet_sido_to_bjd(code[:2])
-            except OpinetInvalidParameterError as exc:
-                raise OpinetServerError(f"{endpoint}: {exc}") from exc
             parsed.append(AreaCode(code=code, name=name, raw=row))
         return parsed
 
