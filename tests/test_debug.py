@@ -251,3 +251,112 @@ def test_replay_fixture_rejects_invalid_shapes() -> None:
         replay_fixture_case({"function": "get_area_codes", "response": []})
     with pytest.raises(ValueError):
         replay_fixture_case({"function": "get_area_codes", "response": {"body": []}})
+
+
+def test_debug_fetch_routes_all_five_apis_without_hardcoded_branches(load_fixture, mock_opinet) -> None:
+    """``debug_fetch``는 ``function_name`` 문자열 분기 없이 카탈로그로만 라우팅해야 한다."""
+    mock_opinet.add("avgAllPrice.do", json=load_fixture("avg_all_price.json"))
+    mock_opinet.add("lowTop10.do", json=load_fixture("low_top10_B027.json"))
+    mock_opinet.add("aroundAll.do", json=load_fixture("around_all_gangnam.json"))
+    mock_opinet.add("detailById.do", json=load_fixture("detail_by_id_A0010207.json"))
+    mock_opinet.add("areaCode.do", json=load_fixture("area_code_root.json"))
+
+    client = OpinetClient("secret-key", retry_backoff=0)
+    original_transport = client._http
+
+    avg = client.debug_fetch("get_national_average_price", {})
+    assert avg.ok is True
+    assert avg.request["url"].endswith("avgAllPrice.do")
+    assert avg.response["status_code"] == 200
+    assert avg.processed[0].provider_product_code == "B034"
+
+    # Streamlit 위젯은 text_input/selectbox로 항상 문자열을 준다. 카탈로그의
+    # ApiParameter.kind로 int/float 변환이 이뤄지는지 여기서 함께 검증한다.
+    low = client.debug_fetch("get_lowest_price_top20", {"prodcd": "B027", "cnt": "2", "area": "01"})
+    assert low.ok is True
+    assert low.request["query"]["cnt"] == 2
+    assert low.processed[0].provider_station_id == "A0013150"
+
+    around = client.debug_fetch(
+        "search_stations_around",
+        {"katec_x": "314871.8", "katec_y": "544012.0", "radius_m": "1000", "prodcd": "B027", "sort": "2"},
+    )
+    assert around.ok is True
+    assert around.request["query"]["sort"] == "2"
+    assert around.processed[0].provider_station_id == "A0010207"
+
+    detail = client.debug_fetch("get_station_detail", {"uni_id": "A0010207"})
+    assert detail.ok is True
+    assert detail.processed.provider_station_id == "A0010207"
+
+    area = client.debug_fetch("get_area_codes", {})
+    assert area.ok is True
+    assert area.processed[0].provider_region_code == "01"
+
+    # 요청 동안 client의 transport를 기록용 proxy로 바꿔치기하지만 항상 원상복구해야 한다.
+    assert client._http is original_transport
+
+
+def test_debug_fetch_unknown_function_raises() -> None:
+    with pytest.raises(KeyError):
+        OpinetClient("secret-key", retry_backoff=0).debug_fetch("unknown_function")
+
+
+def test_debug_fetch_validation_error_before_request_has_no_call(mock_opinet) -> None:
+    run = OpinetClient("secret-key", retry_backoff=0).debug_fetch("search_stations_around", {})
+
+    assert run.ok is False
+    assert run.error["type"] == "OpinetInvalidParameterError"
+    assert run.error["status_code"] is None
+    assert run.request == {}
+    assert run.response == {}
+    assert not mock_opinet.calls
+
+
+def test_debug_fetch_missing_auth_returns_structured_error(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("OPINET_API_KEY", raising=False)
+
+    run = OpinetClient(retry_backoff=0).debug_fetch("get_area_codes", {})
+
+    assert run.ok is False
+    assert run.error["type"] == "OpinetAuthError"
+    assert run.request == {}
+    assert run.response == {}
+
+
+def test_debug_fetch_captures_request_response_on_downstream_error(load_fixture, mock_opinet) -> None:
+    """HTTP 호출은 성공했지만 이후 단계(빈 결과 처리)에서 실패해도 request/response는 남아야 한다."""
+    mock_opinet.add("areaCode.do", json=load_fixture("empty_oil.json"))
+    client = OpinetClient("secret-key", retry_backoff=0, strict_empty=True)
+
+    run = client.debug_fetch("get_area_codes", {})
+
+    assert run.ok is False
+    assert run.error["type"] == "OpinetNoDataError"
+    assert run.response["status_code"] == 200
+    assert run.response["body"] == {"RESULT": {"OIL": []}}
+    assert run.request["url"].endswith("areaCode.do")
+
+
+def test_debug_fetch_http_error_includes_provider_status_code(mock_opinet) -> None:
+    mock_opinet.add("areaCode.do", status=401, body="invalid key")
+    client = OpinetClient("secret-key", retry_backoff=0)
+
+    run = client.debug_fetch("get_area_codes", {})
+
+    assert run.ok is False
+    assert run.error["type"] == "OpinetAuthError"
+    assert run.error["status_code"] == 401
+
+
+def test_debug_fetch_extra_params_reach_client_as_typeerror(mock_opinet) -> None:
+    """카탈로그에 없는 파라미터(Extra params escape hatch)는 그대로 전달되고, client가 받아들이지
+    못하면 예외를 삼키지 않고 구조화된 오류로 드러나야 한다."""
+    client = OpinetClient("secret-key", retry_backoff=0)
+
+    run = client.debug_fetch("get_area_codes", {"typo_param": "x"})
+
+    assert run.ok is False
+    assert run.error["type"] == "TypeError"
+    assert not mock_opinet.calls

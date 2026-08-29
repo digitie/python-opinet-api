@@ -18,7 +18,7 @@ from .exceptions import OpinetAuthError, OpinetInvalidParameterError, OpinetNoDa
 from .models import AreaCode, AvgPrice, OilPrice, Station, StationDetail
 
 if TYPE_CHECKING:
-    from .debug import OpinetDebugClient
+    from .debug import DebugRun, OpinetDebugClient
     from .vworld import OpinetSigunguBjdMapping, _VworldDistrictClient
 
 _logger = logging.getLogger(__name__)
@@ -350,6 +350,21 @@ class OpinetClient:
         from .debug import OpinetDebugClient
 
         return OpinetDebugClient(self)
+
+    def debug_fetch(
+        self,
+        function_name: str,
+        params: dict[str, Any] | None = None,
+        *,
+        raise_errors: bool = False,
+    ) -> DebugRun:
+        """카탈로그 기반 제네릭 디버그 실행 진입점(``self.debug().debug_fetch(...)`` 단축 경로).
+
+        Streamlit 디버그 UI가 쓰는 메서드로, ``function_name`` 하드코딩 분기 없이
+        카탈로그의 파라미터 메타데이터로 라우팅한다. 자세한 동작은
+        ``opinet.debug.OpinetDebugClient.debug_fetch``를 참고한다.
+        """
+        return self.debug().debug_fetch(function_name, params, raise_errors=raise_errors)
 
     def _handle_empty(self, rows: list[Any], endpoint: str, strict_empty: bool | None = None) -> None:
         if strict_empty is None:

@@ -19,6 +19,10 @@ dependencies = [
 vworld = [
     "python-vworld-api>=0.1.0",
 ]
+debug-ui = [
+    "pandas>=2",
+    "streamlit>=1.36",
+]
 dev = [
     "build",
     "pytest>=7.0",
