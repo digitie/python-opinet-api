@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from datetime import date, datetime, time
 from typing import Any
 
@@ -31,11 +32,15 @@ def to_float_or_none(value: Any) -> float | None:
     if value is None:
         return None
     if isinstance(value, (int, float)):
-        return float(value)
-    text = str(value).strip()
-    if not text:
-        return None
-    return float(text)
+        result = float(value)
+    else:
+        text = str(value).strip()
+        if not text:
+            return None
+        result = float(text)
+    if not math.isfinite(result):
+        raise ValueError(f"non-finite float: {value!r}")
+    return result
 
 
 def to_bool_yn(value: Any) -> bool:

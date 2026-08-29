@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import math
-from functools import lru_cache
+import threading
 from typing import Any
 
 WGS84_CRS = "EPSG:4326"
@@ -55,8 +55,19 @@ def _finite_float(value: Any, field_name: str) -> float:
     return result
 
 
-@lru_cache(maxsize=8)
+_transformer_cache = threading.local()
+
+
 def _transformer(source_crs: str, target_crs: str):  # type: ignore[no-untyped-def]
     from pyproj import Transformer
 
-    return Transformer.from_crs(source_crs, target_crs, always_xy=True)
+    cache: dict[tuple[str, str], Any] | None = getattr(_transformer_cache, "cache", None)
+    if cache is None:
+        cache = {}
+        _transformer_cache.cache = cache
+    key = (source_crs, target_crs)
+    transformer = cache.get(key)
+    if transformer is None:
+        transformer = Transformer.from_crs(source_crs, target_crs, always_xy=True)
+        cache[key] = transformer
+    return transformer

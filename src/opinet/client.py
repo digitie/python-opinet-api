@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import math
 from collections.abc import AsyncIterator, Iterator
 from datetime import date, time
@@ -18,7 +19,9 @@ from .models import AreaCode, AvgPrice, OilPrice, Station, StationDetail
 
 if TYPE_CHECKING:
     from .debug import OpinetDebugClient
-    from .vworld import OpinetSigunguBjdMapping
+    from .vworld import OpinetSigunguBjdMapping, _VworldDistrictClient
+
+_logger = logging.getLogger(__name__)
 
 
 def _normalize_oil(data: dict[str, Any], endpoint: str) -> list[dict[str, Any]]:
@@ -29,6 +32,8 @@ def _normalize_oil(data: dict[str, Any], endpoint: str) -> list[dict[str, Any]]:
         raise OpinetServerError(f"{endpoint}: RESULT.OIL is missing")
 
     oil = result["OIL"]
+    if oil is None:
+        return []
     if isinstance(oil, dict):
         return [oil]
     if isinstance(oil, list):
@@ -52,17 +57,23 @@ def _load_default_api_key_from_env_file() -> str | None:
         raw_value = _read_env_value(env_path, "OPINET_API_KEY")
         normalized = _normalize_api_key(raw_value)
         if normalized is not None:
+            _logger.debug("OPINET_API_KEY loaded from %s", env_path)
             return normalized
     return None
+
+
+_MAX_ENV_SEARCH_DEPTH = 10
 
 
 def _candidate_env_paths() -> tuple[Path, ...]:
     cwd = Path.cwd().resolve()
     paths: list[Path] = []
-    for directory in (cwd, *cwd.parents):
+    for depth, directory in enumerate((cwd, *cwd.parents)):
         env_path = directory / ".env"
         if env_path not in paths:
             paths.append(env_path)
+        if (directory / ".git").exists() or depth >= _MAX_ENV_SEARCH_DEPTH:
+            break
     return tuple(paths)
 
 
@@ -201,6 +212,16 @@ def _coordinate_query_params(
 _METERS_PER_DEGREE_LAT = 111_320.0
 """위도 1도당 대략적인 거리(m). bbox grid 간격 계산용 근사."""
 
+_MAX_BBOX_GRID_CELLS = 20_000
+"""bbox grid 셀 수 상한. 초과하면 호출 폭주를 막기 위해 예외를 발생시킨다."""
+
+
+def _lon_step_for_lat(lat: float, spacing_m: float, fallback: float) -> float:
+    meters_per_degree_lon = _METERS_PER_DEGREE_LAT * math.cos(math.radians(lat))
+    if meters_per_degree_lon <= 1.0:  # 극단 위도 방어(0 division/과도한 step)
+        return fallback
+    return spacing_m / meters_per_degree_lon
+
 
 def _bbox_grid_centers(
     *,
@@ -214,9 +235,11 @@ def _bbox_grid_centers(
 
     ``iter_stations_in_bbox`` 근사 enumeration용. 인접 원이 격자 셀 모서리까지
     덮도록 중심 간격을 ``radius_m * √2``로 둔다(정사각 격자에서 셀 모서리까지의
-    거리 = 간격/√2 = ``radius_m``). 경도 간격은 bbox 중앙 위도의 ``cos`` 보정을
-    적용한다. 마지막 행/열은 ``max`` 경계를 넘기도록 한 칸 더 생성해 경계 부근
-    누락을 막는다(좌표는 (lon, lat) 순서).
+    거리 = 간격/√2 = ``radius_m``). 경도 간격은 각 행(위도)마다 그 위도의
+    ``cos`` 보정을 적용해 다시 계산한다(고정된 한 위도로 계산하면 반대편 가장자리에
+    빈틈이 생긴다). 마지막 행/열은 ``max`` 경계를 넘기도록 한 칸 더 생성해 경계
+    부근 누락을 막는다(좌표는 (lon, lat) 순서). 예상 셀 수가 ``_MAX_BBOX_GRID_CELLS``를
+    넘으면 ``OpinetInvalidParameterError``를 발생시킨다.
     """
     if min_lon > max_lon or min_lat > max_lat:
         raise OpinetInvalidParameterError("bbox min 좌표는 max 좌표 이하이어야 한다")
@@ -225,17 +248,24 @@ def _bbox_grid_centers(
 
     spacing_m = radius_m * math.sqrt(2.0)
     lat_step = spacing_m / _METERS_PER_DEGREE_LAT
-    mid_lat = (min_lat + max_lat) / 2.0
-    meters_per_degree_lon = _METERS_PER_DEGREE_LAT * math.cos(math.radians(mid_lat))
-    if meters_per_degree_lon <= 1.0:  # 극단 위도 방어(0 division/과도한 step)
-        lon_step = (max_lon - min_lon) or lat_step
-    else:
-        lon_step = spacing_m / meters_per_degree_lon
-
     lat_count = max(1, math.ceil((max_lat - min_lat) / lat_step))
-    lon_count = max(1, math.ceil((max_lon - min_lon) / lon_step))
+
+    # 셀 수 상한 검사: bbox 내에서 경도 1도가 가장 넓은(적도에 가장 가까운) 위도를
+    # 기준으로 최악의 경우(격자가 가장 촘촘해지는 경우)를 추정한다.
+    worst_abs_lat = 0.0 if min_lat <= 0.0 <= max_lat else min(abs(min_lat), abs(max_lat))
+    worst_lon_step = _lon_step_for_lat(worst_abs_lat, spacing_m, fallback=(max_lon - min_lon) or lat_step)
+    worst_lon_count = max(1, math.ceil((max_lon - min_lon) / worst_lon_step))
+    total_cells = (lat_count + 1) * (worst_lon_count + 1)
+    if total_cells > _MAX_BBOX_GRID_CELLS:
+        raise OpinetInvalidParameterError(
+            f"bbox/radius_m combination requires too many grid cells "
+            f"({total_cells} > {_MAX_BBOX_GRID_CELLS}); use a smaller bbox or larger radius_m"
+        )
+
     for i in range(lat_count + 1):
         lat = min_lat + i * lat_step
+        lon_step = _lon_step_for_lat(lat, spacing_m, fallback=(max_lon - min_lon) or lat_step)
+        lon_count = max(1, math.ceil((max_lon - min_lon) / lon_step))
         for j in range(lon_count + 1):
             yield (min_lon + j * lon_step, lat)
 
@@ -321,8 +351,10 @@ class OpinetClient:
 
         return OpinetDebugClient(self)
 
-    def _handle_empty(self, rows: list[Any], endpoint: str) -> None:
-        if not rows and self.strict_empty:
+    def _handle_empty(self, rows: list[Any], endpoint: str, strict_empty: bool | None = None) -> None:
+        if strict_empty is None:
+            strict_empty = self.strict_empty
+        if not rows and strict_empty:
             raise OpinetNoDataError(f"{endpoint}: RESULT.OIL is empty")
 
     def _parse_national_average_price_response(self, data: dict[str, Any]) -> list[AvgPrice]:
@@ -375,6 +407,8 @@ class OpinetClient:
             name = strip_or_none(row.get("AREA_NM"))
             if code is None or name is None:
                 raise OpinetServerError(f"{endpoint}: AREA_CD and AREA_NM are required")
+            if len(code) not in (2, 4) or not code.isdigit():
+                raise OpinetServerError(f"{endpoint}: AREA_CD must be a 2-digit sido or 4-digit sigungu code")
             parsed.append(AreaCode(code=code, name=name, raw=row))
         return parsed
 
@@ -538,7 +572,7 @@ class OpinetClient:
         self,
         sigungu_code: str,
         *,
-        vworld_client: Any,
+        vworld_client: "_VworldDistrictClient",
     ) -> OpinetSigunguBjdMapping:
         """VWorld 행정구역 검색으로 오피넷 시군구 코드를 법정동 코드로 해석한다."""
 
@@ -669,7 +703,12 @@ class AsyncOpinetClient:
         self._http = self._transport
         self.closed = False
         self._parser: OpinetClient = OpinetClient.__new__(OpinetClient)
-        self._parser.strict_empty = self.strict_empty
+        self._parser.config = self.config
+        self._parser.api_key = self.api_key
+        self._parser.timeout = self.timeout
+        self._parser._transport = None
+        self._parser._http = None
+        self._parser.closed = False
 
     def _require_http(self) -> _AsyncOpinetHttp:
         if self._http is None:
@@ -691,12 +730,15 @@ class AsyncOpinetClient:
         raise TypeError("AsyncOpinetClient.close() is not supported; use await aclose()")
 
     def debug(self) -> OpinetDebugClient:
-        raise TypeError("AsyncOpinetClient does not support the sync debug helper")
+        raise TypeError(
+            "AsyncOpinetClient does not support the sync debug helper; "
+            "construct a separate OpinetClient for debug recording"
+        )
 
     async def get_national_average_price(self) -> list[AvgPrice]:
         endpoint = "avgAllPrice.do"
         parsed = self._parser._parse_national_average_price_response(await self._require_http().get(endpoint))
-        self._parser._handle_empty(parsed, endpoint)
+        self._parser._handle_empty(parsed, endpoint, self.strict_empty)
         return parsed
 
     async def get_lowest_price_top20(
@@ -719,7 +761,7 @@ class AsyncOpinetClient:
             endpoint,
             request_product_code=product_code,
         )
-        self._parser._handle_empty(parsed, endpoint)
+        self._parser._handle_empty(parsed, endpoint, self.strict_empty)
         return parsed
 
     async def search_stations_around(
@@ -754,7 +796,7 @@ class AsyncOpinetClient:
             endpoint,
             request_product_code=product_code,
         )
-        self._parser._handle_empty(parsed, endpoint)
+        self._parser._handle_empty(parsed, endpoint, self.strict_empty)
         return parsed
 
     async def get_station_detail(self, uni_id: str) -> StationDetail:
@@ -773,7 +815,7 @@ class AsyncOpinetClient:
         endpoint = "areaCode.do"
         params = {"area": sido} if sido is not None else None
         parsed = self._parser._parse_area_codes_response(await self._require_http().get(endpoint, params=params))
-        self._parser._handle_empty(parsed, endpoint)
+        self._parser._handle_empty(parsed, endpoint, self.strict_empty)
         return parsed
 
     async def iter_stations_in_bbox(

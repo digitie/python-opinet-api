@@ -17,7 +17,6 @@ class OpinetConfig:
     strict_empty: bool = False
     max_retries: int = 2
     retry_backoff: float = 0.5
-    base_url: str = DEFAULT_BASE_URL
 
     @classmethod
     def from_env(

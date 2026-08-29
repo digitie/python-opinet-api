@@ -1,8 +1,21 @@
 """오피넷 클라이언트 예외 계층."""
 
+from collections.abc import Mapping
+
 
 class OpinetError(Exception):
     """모든 오피넷 클라이언트 오류의 공통 기본 클래스."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        status_code: int | None = None,
+        headers: Mapping[str, str] | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.status_code = status_code
+        self.headers = headers
 
 
 class OpinetAuthError(OpinetError):
