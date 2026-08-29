@@ -3,12 +3,34 @@
 from __future__ import annotations
 
 import asyncio
+import logging
+import random
+import re
 from dataclasses import dataclass, field
 from time import sleep
 from typing import Any, Protocol
 
 from .config import DEFAULT_BASE_URL
 from .exceptions import OpinetAuthError, OpinetNetworkError, OpinetRateLimitError, OpinetServerError
+
+_MAX_BACKOFF_SECONDS = 30.0
+_CERTKEY_RE = re.compile(r"certkey=[^&\s]+")
+
+
+def _redact(text: str) -> str:
+    return _CERTKEY_RE.sub("certkey=<REDACTED>", text)
+
+
+class _CertkeyLogFilter(logging.Filter):
+    def filter(self, record: logging.LogRecord) -> bool:
+        message = record.getMessage()
+        if "certkey=" in message:
+            record.msg = _redact(message)
+            record.args = ()
+        return True
+
+
+logging.getLogger("httpx").addFilter(_CertkeyLogFilter())
 
 
 def _load_httpx() -> Any:
@@ -34,26 +56,53 @@ def _is_retryable_transport_error(exc: Exception) -> bool:
 
 def _raise_for_response(response: Any) -> dict[str, Any]:
     if response.status_code in (401, 403):
-        raise OpinetAuthError(f"HTTP {response.status_code}: {response.text[:200]}")
+        raise OpinetAuthError(
+            f"HTTP {response.status_code}: {_redact(response.text)[:200]}",
+            status_code=response.status_code,
+            headers=response.headers,
+        )
     if response.status_code == 429:
-        raise OpinetRateLimitError(response.text[:200])
+        raise OpinetRateLimitError(
+            _redact(response.text)[:200],
+            status_code=response.status_code,
+            headers=response.headers,
+        )
     if 500 <= response.status_code < 600:
-        raise OpinetServerError(f"HTTP {response.status_code}: {response.text[:200]}")
+        raise OpinetServerError(
+            f"HTTP {response.status_code}: {_redact(response.text)[:200]}",
+            status_code=response.status_code,
+            headers=response.headers,
+        )
 
     try:
         data = response.json()
-    except ValueError as exc:
-        raise OpinetServerError(f"JSON parse failure: {exc}") from exc
+    except (ValueError, RecursionError) as exc:
+        raise OpinetServerError(
+            f"JSON parse failure: {exc}",
+            status_code=response.status_code,
+            headers=response.headers,
+        ) from exc
+
+    if not isinstance(data, dict):
+        raise OpinetServerError(
+            f"Unexpected response body: {str(data)[:200]}",
+            status_code=response.status_code,
+            headers=response.headers,
+        )
 
     result = data.get("RESULT")
     if not isinstance(result, dict):
-        text = str(result)
+        text = _redact(str(result))
         lowered = text.lower()
         if "invalid" in lowered:
-            raise OpinetAuthError(text[:200])
+            raise OpinetAuthError(text[:200], status_code=response.status_code, headers=response.headers)
         if "limit" in lowered or "초과" in text:
-            raise OpinetRateLimitError(text[:200])
-        raise OpinetServerError(f"Unexpected RESULT: {text[:200]}")
+            raise OpinetRateLimitError(text[:200], status_code=response.status_code, headers=response.headers)
+        raise OpinetServerError(
+            f"Unexpected RESULT: {text[:200]}",
+            status_code=response.status_code,
+            headers=response.headers,
+        )
     return data
 
 
@@ -76,6 +125,7 @@ class SyncHttpxTransport:
     max_retries: int = 2
     retry_backoff: float = 0.5
     session: Any = field(default_factory=_new_sync_client)
+    _last_status_code: int | None = field(default=None, init=False, repr=False)
 
     BASE_URL = DEFAULT_BASE_URL
 
@@ -91,6 +141,8 @@ class SyncHttpxTransport:
         for attempt in range(attempts):
             try:
                 response = self.session.get(self.BASE_URL + endpoint, params=query, timeout=self.timeout)
+            except RuntimeError as exc:
+                raise OpinetNetworkError(str(exc)) from exc
             except Exception as exc:
                 if not _is_retryable_transport_error(exc):
                     raise
@@ -104,6 +156,7 @@ class SyncHttpxTransport:
                 self._sleep_before_retry(attempt)
                 continue
 
+            self._last_status_code = response.status_code
             return _raise_for_response(response)
 
         if last_error is not None:
@@ -124,7 +177,8 @@ class SyncHttpxTransport:
     def _sleep_before_retry(self, attempt: int) -> None:
         if self.retry_backoff <= 0:
             return
-        sleep(self.retry_backoff * (2**attempt))
+        delay = min(self.retry_backoff * (2**attempt) * random.uniform(0.5, 1.5), _MAX_BACKOFF_SECONDS)
+        sleep(delay)
 
 
 @dataclass(slots=True)
@@ -149,6 +203,8 @@ class AsyncHttpxTransport:
         for attempt in range(attempts):
             try:
                 response = await self.session.get(self.BASE_URL + endpoint, params=query, timeout=self.timeout)
+            except RuntimeError as exc:
+                raise OpinetNetworkError(str(exc)) from exc
             except Exception as exc:
                 if not _is_retryable_transport_error(exc):
                     raise
@@ -182,7 +238,8 @@ class AsyncHttpxTransport:
     async def _sleep_before_retry(self, attempt: int) -> None:
         if self.retry_backoff <= 0:
             return
-        await asyncio.sleep(self.retry_backoff * (2**attempt))
+        delay = min(self.retry_backoff * (2**attempt) * random.uniform(0.5, 1.5), _MAX_BACKOFF_SECONDS)
+        await asyncio.sleep(delay)
 
 
 _OpinetHttp = SyncHttpxTransport

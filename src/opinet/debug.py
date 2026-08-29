@@ -242,7 +242,8 @@ def parse_debug_response(
     input_data: MappingABC[str, Any] | None = None,
 ) -> Any:
     """fixture의 raw response body를 공식 클라이언트 모델로 파싱한다."""
-    client = OpinetClient(api_key="fixture-replay", retry_backoff=0)
+    client = OpinetClient.__new__(OpinetClient)
+    client.strict_empty = False
     input_data = input_data or {}
     if function_name == "get_national_average_price":
         return client._parse_national_average_price_response(response_body)
@@ -481,8 +482,9 @@ class OpinetDebugClient:
             f"prepared request for {endpoint}",
         ]
         try:
-            body = self._client._require_http().get(endpoint, params=params)
-            response = {"status_code": 200, "headers": {}, "body": body}
+            http = self._client._require_http()
+            body = http.get(endpoint, params=params)
+            response = {"status_code": http._last_status_code, "headers": {}, "body": body}
             trace.append("received JSON response")
             parsed = parse_debug_response(function_name, body, input_data=input_data)
             if isinstance(parsed, list):

@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Hashable, Mapping, Sequence
 from dataclasses import dataclass, field
+from functools import lru_cache
 from types import MappingProxyType
 from typing import Any, Protocol
 
@@ -11,8 +12,14 @@ from .codes import BJD_LEGACY_TO_NEW, opinet_sido_to_bjd
 from .exceptions import OpinetInvalidParameterError, OpinetNoDataError, OpinetServerError
 from .models import AreaCode
 
+_VworldNoDataError: type[Exception] | None
+try:
+    from vworld.exceptions import VworldNoDataError as _VworldNoDataError
+except ImportError:
+    _VworldNoDataError = None
 
-class _OpinetAreaClient(Protocol):
+
+class _OpinetAreaClient(Hashable, Protocol):
     def get_area_codes(self, sido: str | None = None) -> list[AreaCode]: ...
 
 
@@ -85,6 +92,11 @@ def _find_area(areas: Sequence[AreaCode], code: str) -> AreaCode | None:
     return None
 
 
+@lru_cache(maxsize=None)
+def _cached_area_codes(opinet_client: _OpinetAreaClient, sido: str | None = None) -> tuple[AreaCode, ...]:
+    return tuple(opinet_client.get_area_codes(sido))
+
+
 def _vworld_queries(sido_code: str, opinet_sido_name: str, sigungu_name: str) -> list[str]:
     names = list(OPINET_SIDO_VWORLD_NAMES.get(sido_code, ()))
     if opinet_sido_name and opinet_sido_name not in names:
@@ -123,7 +135,7 @@ def _response_items(payload: Mapping[str, Any]) -> list[Mapping[str, Any]]:
 
 
 def _is_vworld_no_data(exc: Exception) -> bool:
-    return exc.__class__.__name__ == "VworldNoDataError"
+    return _VworldNoDataError is not None and isinstance(exc, _VworldNoDataError)
 
 
 def _pick_sigungu_item(
@@ -192,11 +204,11 @@ def resolve_sigungu_bjd_code(
     normalized_code = _validate_sigungu_code(sigungu_code)
     sido_code = normalized_code[:2]
 
-    sido = _find_area(opinet_client.get_area_codes(), sido_code)
+    sido = _find_area(_cached_area_codes(opinet_client), sido_code)
     if sido is None:
         raise OpinetNoDataError(f"Opinet sido code {sido_code!r} was not found")
 
-    sigungu = _find_area(opinet_client.get_area_codes(sido_code), normalized_code)
+    sigungu = _find_area(_cached_area_codes(opinet_client, sido_code), normalized_code)
     if sigungu is None:
         raise OpinetNoDataError(f"Opinet sigungu code {normalized_code!r} was not found")
 
