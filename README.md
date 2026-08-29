@@ -630,7 +630,7 @@ pytest --cov=opinet --cov-fail-under=90
 
 ## 라이선스
 
-라이브러리 코드: MIT (또는 사용자 지정).
+라이브러리 코드: GPL-3.0-or-later.
 
 데이터: 한국석유공사 오피넷 이용 약관 준수.
 
