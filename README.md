@@ -1,10 +1,33 @@
 # python-opinet-api
 
-[한국석유공사(KNOC) 오피넷](https://www.opinet.co.kr) 오픈 API의 비공식 Python 클라이언트 라이브러리.
+![Python 3.11+](https://img.shields.io/badge/python-3.11+-blue.svg)
+![GPL-3.0-or-later 라이선스](https://img.shields.io/badge/License-GPL--3.0--or--later-blue.svg)
 
-전국 약 1만 2천여 개 주유소·자동차충전소의 가격 정보를 조회하고, 좌표(KATEC ↔ WGS84) 변환과 응답 데이터의 Python 네이티브 타입 변환을 자동 처리합니다.
+[한국석유공사(KNOC) 오피넷](https://www.opinet.co.kr) 오픈 API의 비공식 Python 클라이언트 라이브러리입니다. 전국 약 1만 2천여 개 주유소·자동차충전소의 가격 정보를 조회하고, 좌표(KATEC ↔ WGS84) 변환과 응답 데이터의 Python 네이티브 타입 변환을 자동 처리합니다. 공식 검증된 5개 엔드포인트는 `OpinetClient`가, PDF 가이드북의 미검증 17개는 `opinet.experimental.OpinetExperimentalClient`가 분리해서 제공합니다.
 
-> 현재 저장소는 `opinet-api.md` 명세를 바탕으로 공식 5개 엔드포인트를 구현한 초기 라이브러리입니다. PDF 가이드북의 추가 API는 아직 검증 전이므로 `opinet.experimental`에 분리합니다.
+최근 변경 사항은 [`CHANGELOG.md`](./CHANGELOG.md)의 `[Unreleased]` 섹션을 참고하세요.
+
+## 제공 표면
+
+| 표면 | 진입점 | 설명 |
+|---|---|---|
+| 공식 클라이언트 (5개 엔드포인트) | `opinet.OpinetClient` / `opinet.AsyncOpinetClient` | 평균가·최저가·반경검색·상세조회·지역코드 5종을 동기/비동기로 호출 |
+| 실험 클라이언트 (미검증 17종) | `opinet.experimental.OpinetExperimentalClient` | PDF 가이드북의 추가 API, 호출 동작 미보장 |
+| 좌표 변환 | `opinet.coords.katec_to_wgs84()` / `wgs84_to_katec()` | KATEC ↔ WGS84 좌표 변환 |
+| 시도코드 매핑 | `opinet.codes.opinet_sido_to_bjd()` / `bjd_sido_to_opinet()` | 오피넷 시도코드 ↔ 행정안전부 법정동코드 |
+| API 카탈로그 / 디버그 | `opinet.get_api_catalog_options()`, `OpinetClient.debug()` | 디버그 UI/fixture 생성을 위한 카탈로그·trace 지원 |
+| normalized DTO | `opinet.normalized` | 저장 계층에 바로 넘기기 좋은 Pydantic DTO record |
+
+## 먼저 읽을 문서
+
+| 필요 정보 | 문서 |
+|---|---|
+| API 필드, 코드표, 응답 예시, 테스트 전략 | [`opinet-api.md`](./opinet-api.md) |
+| 구현 상태와 유지보수 체크리스트 | [`docs/implementation-status.md`](./docs/implementation-status.md) |
+| 디버그 UI fixture 저장/replay 설계 | [`docs/debug-fixture-workflow.md`](./docs/debug-fixture-workflow.md) |
+| 구조적 의사결정 기록 | [`docs/decisions.md`](./docs/decisions.md) |
+| AI 에이전트(Claude Code 등) 자동 구현 skill | [`SKILL.md`](./SKILL.md) |
+| 변경 이력 | [`CHANGELOG.md`](./CHANGELOG.md) |
 
 ---
 
@@ -567,11 +590,14 @@ python -m mypy src/opinet
 .
 ├── AGENTS.md           # 에이전트 작업 지침
 ├── README.md            # 이 파일
+├── CHANGELOG.md          # 변경 이력 (Keep a Changelog)
+├── LICENSE               # GPL-3.0-or-later 전문
 ├── opinet-api.md        # API 명세서 (라이브러리 구현 레퍼런스)
 ├── SKILL.md             # Claude Code용 자동 구현 skill
 ├── pyproject.toml       # 패키지/테스트 설정
 ├── docs/
 │   ├── debug-fixture-workflow.md
+│   ├── decisions.md
 │   └── implementation-status.md
 ├── examples/
 │   └── streamlit_debug_app.py
@@ -630,11 +656,9 @@ pytest --cov=opinet --cov-fail-under=90
 
 ## 라이선스
 
-라이브러리 코드: MIT (또는 사용자 지정).
+이 저장소의 라이브러리 코드는 [GPL-3.0-or-later](./LICENSE)로 배포됩니다. 이 라이선스는 이 저장소의 코드에만 적용되며, 감싸고 있는 한국석유공사 오피넷 데이터/API 이용은 [오피넷 이용 약관](https://www.opinet.co.kr)을 따릅니다.
 
-데이터: 한국석유공사 오피넷 이용 약관 준수.
-
-본 프로젝트는 비공식이며 한국석유공사와 무관합니다.
+본 프로젝트는 비공식이며 한국석유공사와 무관합니다. 라이브러리는 오피넷 API 응답을 있는 그대로 전달·변환할 뿐이며, 데이터의 정확성·최신성이나 법적 효력을 보장하지 않습니다.
 
 ---
 
@@ -647,18 +671,6 @@ pytest --cov=opinet --cov-fail-under=90
 - 데이터 문의: (052) 216-2514, price@knoc.co.kr
 - KNOC 공공데이터 가이드북: https://www.knoc.co.kr (공공데이터 메뉴)
 - 행정안전부 행정표준코드관리시스템 (법정동): https://www.code.go.kr
-
-## 변경 이력
-
-| 일자 | 내용 |
-|---|---|
-| 2026-05-15 (rev10) | 서비스키 공백 제거 및 `.env` 기본 로드, 공식 API 카탈로그, Streamlit Debug Trace 표시용 `DebugRun`, fixture replay 문서와 예제 앱 추가. |
-| 2026-05-09 (rev9) | Windows/PowerShell 환경에서 `rg` 실행 권한 실패 시 우회 명령을 사용하고, 한글 파일은 UTF-8 인코딩을 명시해 읽는 규칙 추가. |
-| 2026-05-09 (rev8) | 문서의 파일 위치 표기를 프로젝트 기준 상대 경로로 고정하고, Python 내부 문서를 한글로 작성한다는 규칙을 추가. |
-| 2026-04-30 (rev3) | 공식 5개 엔드포인트 구현, fixture 기반 네트워크-free 테스트 115개, mypy/coverage 검증, 반복 실수 방지 체크리스트 추가. |
-| 2026-04-30 (rev2) | 응답 데이터 Python 네이티브 타입 변환(`date`/`time`/`float`/`bool`/enum) 명시. 시도코드 ↔ 법정동코드 매핑 추가. |
-| 2026-04-30 (rev1) | 초기 명세서 작성. 공식 사이트 기준 5개 API 검증. 시도코드/필드 의미 정정. |
-
 
 ---
 
@@ -802,10 +814,6 @@ def to_station_record(station):
 
 `raw`를 저장할지, 별도 raw table에 둘지, serving table에 normalized 값만 둘지는 애플리케이션 정책으로 결정하세요. python-opinet-api는 OpiNet domain parsing과 canonical helper만 제공합니다.
 
-| 날짜 | 내용 |
-|---|---|
-| 2026-05-06 (rev4) | 공용 normalized layer 추가. `FuelType`, ProductCode 양방향 mapping, Station product/trade context, coordinate value object, AreaCode helper, read-only raw payload 보존을 문서화. |
-
 ### normalized DTO records
 
 `opinet.normalized` 모듈은 앱 저장 계층에 바로 넘기기 쉬운 Pydantic DTO record를 제공합니다. 기존 `AvgPrice`, `Station`, `AreaCode` 모델은 그대로 유지되고, 필요할 때 `to_normalized()`로 변환합니다. DTO는 Pydantic v2 `BaseModel` 기반이며 `frozen=True`, `extra="forbid"` 설정으로 불변 record처럼 동작합니다.
@@ -878,9 +886,3 @@ payload = station_record.model_dump(mode="json")  # Pydantic JSON mode
 python-opinet-api는 PEP 561 typed package입니다. 소스에는 `src/opinet/py.typed` marker가 있고, 배포 산출물에는 import 패키지 경로인 `opinet/py.typed`로 포함됩니다. downstream 프로젝트의 mypy가 `opinet`과 `opinet.normalized` 타입 정보를 직접 읽을 수 있습니다.
 
 패키징 테스트는 wheel과 sdist를 각각 임시 venv에 설치한 뒤 `import opinet`, `import opinet.normalized`, downstream mypy smoke를 확인합니다.
-
-| 날짜 | 내용 |
-|---|---|
-| 2026-05-06 (rev5) | `opinet.normalized` Pydantic DTO layer 추가. `NormalizedFuelAverage`, `NormalizedFuelStation`, `NormalizedFuelRegionCode`, KST datetime helper, JSON-safe raw 변환 helper, 모델별 `to_normalized()` 문서화. |
-| 2026-05-06 (rev6) | PEP 561 `py.typed` marker와 package data 설정 추가. wheel/sdist 설치 후 import와 downstream mypy smoke 테스트 추가. |
-| 2026-05-07 (rev7) | `StationDetail.to_normalized()`와 `NormalizedFuelStationDetail`, `NormalizedFuelStationDetailPrice` DTO 추가. |
