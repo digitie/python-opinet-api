@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import sys
@@ -145,8 +146,11 @@ def _raw_response_tab(catalog_item: ApiCatalogItem, api_key: str, *, timeout: fl
         st.error("필수 파라미터를 입력하세요: " + ", ".join(missing))
         return
 
-    client = OpinetClient(api_key=api_key or None, timeout=timeout, retry_backoff=0)
-    run = client.debug_fetch(catalog_item.function_name, params)
+    async def execute():
+        async with OpinetClient(api_key=api_key or None, timeout=timeout, retry_backoff=0) as client:
+            return await client.debug_fetch(catalog_item.function_name, params)
+
+    run = asyncio.run(execute())
     _store_run(catalog_item, run)
     if run.error:
         st.error(run.error.get("message", "Unknown error"))

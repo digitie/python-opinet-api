@@ -1029,10 +1029,10 @@ class AreaCode:
 
 ```python
 class OpinetClient:
-    def get_national_average_price(self) -> list[AvgPrice]:
+    async def get_national_average_price(self) -> list[AvgPrice]:
         """avgAllPrice.do — 전국 주유소 평균가격(현재)."""
 
-    def get_lowest_price_top20(
+    async def get_lowest_price_top20(
         self,
         prodcd: ProductCode,
         cnt: int = 10,
@@ -1040,7 +1040,7 @@ class OpinetClient:
     ) -> list[Station]:
         """lowTop10.do — 전국/지역별 최저가 주유소 Top 20."""
 
-    def search_stations_around(
+    async def search_stations_around(
         self,
         *,
         lon: float | None = None,
@@ -1053,10 +1053,10 @@ class OpinetClient:
     ) -> list[Station]:
         """aroundAll.do — 반경 내 주유소 검색."""
 
-    def get_station_detail(self, uni_id: str) -> StationDetail:
+    async def get_station_detail(self, uni_id: str) -> StationDetail:
         """detailById.do — 주유소 상세정보."""
 
-    def get_area_codes(self, sido: str | None = None) -> list[AreaCode]:
+    async def get_area_codes(self, sido: str | None = None) -> list[AreaCode]:
         """areaCode.do — 시도/시군구 코드 조회."""
 ```
 
@@ -1076,7 +1076,7 @@ class OpinetClient:
 #### 예시
 
 ```python
-def search_stations_around(
+async def search_stations_around(
     self,
     *,
     lon: float | None = None,
@@ -1327,18 +1327,18 @@ from opinet.codes import BrandCode
 from opinet.exceptions import OpinetInvalidParameterError
 
 
-def test_around_all_types(client, load_fixture, mock_opinet):
+async def test_around_all_types(client, load_fixture, mock_opinet):
     """응답 모델의 모든 필드가 Python 네이티브 타입으로 채워져야 한다."""
     payload = load_fixture("around_all_gangnam.json")
     mock_opinet.add("aroundAll.do", json=payload)
 
-    stations = client.search_stations_around(
+    stations = (await client.search_stations_around(
         lon=127.0276,
         lat=37.4979,
         radius_m=3000,
         prodcd=ProductCode.GASOLINE,
         sort=SortOrder.PRICE,
-    )
+    ))
 
     s = stations[0]
     assert isinstance(s.uni_id, str)
@@ -1358,9 +1358,9 @@ def test_around_all_types(client, load_fixture, mock_opinet):
     dict(lon=127.0, lat=37.5, radius_m=0),
     dict(lon=127.0, lat=37.5, radius_m=6000),
 ])
-def test_around_all_invalid(client, kwargs):
+async def test_around_all_invalid(client, kwargs):
     with pytest.raises(OpinetInvalidParameterError):
-        client.search_stations_around(**kwargs)
+        (await client.search_stations_around(**kwargs))
 ```
 
 ```python
@@ -1370,10 +1370,10 @@ from opinet import OpinetClient
 from opinet.codes import BrandCode, ProductCode, StationType
 
 
-def test_detail_full_type_mapping(client, load_fixture, mock_opinet):
+async def test_detail_full_type_mapping(client, load_fixture, mock_opinet):
     payload = load_fixture("detail_by_id_A0010207.json")
     mock_opinet.add("detailById.do", json=payload)
-    detail = client.get_station_detail("A0010207")
+    detail = (await client.get_station_detail("A0010207"))
 
     # enum 변환
     assert detail.brand is BrandCode.SKE
@@ -1534,3 +1534,31 @@ def test_invalid_input():
 | 2026-05-09 (rev3) | 문서의 파일 위치는 프로젝트 기준 상대 경로로 쓰고, Python 내부 문서는 한글로 작성한다는 규칙 추가. |
 | 2026-04-30 (rev2) | Python 타입 변환 정책 명시. 시도코드 ↔ 법정동코드 매핑 추가. 응답 필드 표에 Python 타입 컬럼 추가. |
 | 2026-04-30 (rev1) | 초기 작성. 공식 사이트 기준 5개 API 검증. 시도코드/필드 의미 정정. |
+
+
+## 비동기 호출과 요청 속도
+
+`OpinetClient`의 조회와 디버그는 `await`, `iter_stations_in_bbox`는 `async for`,
+종료는 `async with` 또는 `await client.aclose()`를 사용한다. Async 접두사 클라이언트,
+aio 팩터리와 동기 transport는 제거했다. 코드표·좌표·모델 변환·fixture 저장 같은
+로컬 유틸리티는 일반 함수다. 기존 엔드포인트 인자와 반환 모델은 유지한다.
+
+기본 `max_rps=5.0`이다. `AsyncTokenBucket(max_rps, capacity=...)`를
+`rate_limiter=`에 주입하면 여러 클라이언트가 같은 요청 예산을 쓴다. 주입된 버킷이
+max_rps보다 우선한다. 기본 capacity는 max(1, max_rps)이며 초기에는 가득 차
+있으므로 burst를 허용한다. 일정한 간격은 capacity=1로 설정한다.
+각 요청·재시도·리다이렉트·디버그·격자 셀에 같은 버킷을 적용한다.
+인자 검증 실패와 캐시 적중은 요청을 보내지 않는다. TPS는 일일 쿼터를 대신하지 않는다.
+
+버킷은 한 이벤트 루프에서 사용한다. 대기 취소는 토큰을 소비하지 않고 다음 대기자를
+진행시킨다. 401/403/429는 즉시 실패하며 네트워크 오류와 5xx만 기존 backoff로
+재시도한다. 사용자 정의 인증/transport 내부에서 발생하는 추가 전송은 계측 범위 밖이다.
+
+내부 HTTP 세션은 첫 요청 시 생성하고 종료 시 닫는다. session에 주입하는 비동기
+세션은 호출자가 닫는다. 종료한 클라이언트의 추가 요청은 실패한다.
+디버그 기록은 ContextVar로 호출별 격리하고 성공·실패·취소 모두에서 복원한다.
+응답 파싱은 원문으로 완료한 후 진단 결과의 알려진 키와 인코딩된 키를 마스킹한다.
+VWorld 연동은 비동기 search_district를 사용하며 완료된 지역 코드만 캐시한다.
+
+
+예제는 [docs/async-tps.md](docs/async-tps.md)를 참고한다.

@@ -2,11 +2,9 @@
 
 from __future__ import annotations
 
-from ._http import AsyncHttpxTransport, SyncHttpxTransport, SyncTransport, Transport
+from ._http import AsyncHttpxTransport, Transport
 
 __all__ = [
     "AsyncHttpxTransport",
-    "SyncHttpxTransport",
-    "SyncTransport",
     "Transport",
 ]

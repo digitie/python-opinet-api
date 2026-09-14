@@ -1,6 +1,7 @@
+from ._ratelimit import AsyncTokenBucket
 """한국 오피넷 유가 API의 비공식 Python 클라이언트."""
 
-from .client import AsyncOpinetClient, OpinetClient
+from .client import OpinetClient
 from .catalog import (
     API_CATALOG,
     SERVICE_KEY_URL,
@@ -39,7 +40,7 @@ from .debug import (
     save_fixture,
     slugify_case_name,
 )
-from .transport import AsyncHttpxTransport, SyncHttpxTransport, SyncTransport, Transport
+from .transport import AsyncHttpxTransport, Transport
 from .exceptions import (
     OpinetAuthError,
     OpinetError,
@@ -61,12 +62,12 @@ from .normalized import (
 )
 
 __all__ = [
+    "AsyncTokenBucket",
     "AreaCode",
     "API_CATALOG",
     "ApiCatalogItem",
     "ApiParameter",
     "AvgPrice",
-    "AsyncOpinetClient",
     "BrandCode",
     "CanonicalFuelType",
     "DebugRun",
@@ -94,8 +95,6 @@ __all__ = [
     "StationDetail",
     "StationType",
     "AsyncHttpxTransport",
-    "SyncHttpxTransport",
-    "SyncTransport",
     "Transport",
     "assert_case",
     "bjd_sido_to_opinet",

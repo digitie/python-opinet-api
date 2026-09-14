@@ -10,11 +10,12 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from ._convert import strip_or_none, to_bool_yn, to_date, to_float_or_none, to_time
-from ._http import _AsyncOpinetHttp, _OpinetHttp
+from ._http import AsyncHttpxTransport, _redact
+from ._ratelimit import AsyncTokenBucket
 from .config import OpinetConfig
 from .codes import BrandCode, ProductCode, SortOrder, StationType, opinet_sido_to_bjd
 from .coords import katec_to_wgs84, validate_katec_xy, wgs84_to_katec
-from .exceptions import OpinetAuthError, OpinetInvalidParameterError, OpinetNoDataError, OpinetServerError
+from .exceptions import OpinetError, OpinetAuthError, OpinetInvalidParameterError, OpinetNoDataError, OpinetServerError
 from .models import AreaCode, AvgPrice, OilPrice, Station, StationDetail
 
 if TYPE_CHECKING:
@@ -282,6 +283,8 @@ class OpinetClient:
         max_retries: int = 2,
         retry_backoff: float = 0.5,
         session: Any | None = None,
+        max_rps: float = 5.0,
+        rate_limiter: AsyncTokenBucket | None = None,
     ) -> None:
         self.config = OpinetConfig.from_env(
             api_key=api_key,
@@ -293,13 +296,15 @@ class OpinetClient:
         self.api_key = self.config.api_key
         self.timeout = self.config.timeout
         self.strict_empty = self.config.strict_empty
+        self.rate_limiter = rate_limiter if rate_limiter is not None else AsyncTokenBucket(max_rps)
         self._transport = (
-            _OpinetHttp(
+            AsyncHttpxTransport(
                 self.api_key,
                 timeout=self.config.timeout,
                 max_retries=self.config.max_retries,
                 retry_backoff=self.config.retry_backoff,
                 session=session,
+                rate_limiter=self.rate_limiter,
             )
             if self.api_key
             else None
@@ -307,43 +312,27 @@ class OpinetClient:
         self._http = self._transport
         self.closed = False
 
-    def _require_http(self) -> _OpinetHttp:
+    def _require_http(self) -> AsyncHttpxTransport:
         if self._http is None:
             raise OpinetAuthError("OPINET_API_KEY is not set and api_key was not provided")
         return self._http
 
-    @classmethod
-    def aio(
-        cls,
-        *,
-        api_key: str | None = None,
-        timeout: float = 10.0,
-        strict_empty: bool = False,
-        max_retries: int = 2,
-        retry_backoff: float = 0.5,
-        session: Any | None = None,
-    ) -> "AsyncOpinetClient":
-        """Build an asyncio-friendly client backed by ``httpx.AsyncClient``."""
-        return AsyncOpinetClient(
-            api_key=api_key,
-            timeout=timeout,
-            strict_empty=strict_empty,
-            max_retries=max_retries,
-            retry_backoff=retry_backoff,
-            session=session,
-        )
 
-    def close(self) -> None:
-        """Close the underlying ``httpx.Client`` when this client owns one."""
-        if self._http is not None:
-            self._http.close()
-        self.closed = True
+    async def aclose(self) -> None:
+        """소유한 비동기 세션을 닫는다."""
+        try:
+            if self._http is not None:
+                await self._http.aclose()
+            self.closed = True
+        except OpinetError as exc:
+            exc.args = (_redact(str(exc), self.api_key),)
+            raise exc from None
 
-    def __enter__(self) -> "OpinetClient":
+    async def __aenter__(self) -> "OpinetClient":
         return self
 
-    def __exit__(self, exc_type: Any, exc: Any, traceback: Any) -> None:
-        self.close()
+    async def __aexit__(self, exc_type: Any, exc: Any, traceback: Any) -> None:
+        await self.aclose()
 
     def debug(self) -> OpinetDebugClient:
         """디버그 실행과 fixture 저장을 돕는 별도 헬퍼를 반환한다."""
@@ -351,7 +340,7 @@ class OpinetClient:
 
         return OpinetDebugClient(self)
 
-    def debug_fetch(
+    async def debug_fetch(
         self,
         function_name: str,
         params: dict[str, Any] | None = None,
@@ -364,7 +353,11 @@ class OpinetClient:
         카탈로그의 파라미터 메타데이터로 라우팅한다. 자세한 동작은
         ``opinet.debug.OpinetDebugClient.debug_fetch``를 참고한다.
         """
-        return self.debug().debug_fetch(function_name, params, raise_errors=raise_errors)
+        try:
+            return (await self.debug().debug_fetch(function_name, params, raise_errors=raise_errors))
+        except OpinetError as exc:
+            exc.args = (_redact(str(exc), self.api_key),)
+            raise exc from None
 
     def _handle_empty(self, rows: list[Any], endpoint: str, strict_empty: bool | None = None) -> None:
         if strict_empty is None:
@@ -390,7 +383,7 @@ class OpinetClient:
                     )
                 )
             except (ValueError, KeyError) as exc:
-                raise _parse_error(endpoint, exc) from exc
+                raise OpinetServerError(_redact(str(_parse_error(endpoint, exc)), getattr(self, "api_key", None))) from None
         return parsed
 
     def _parse_station_list_response(
@@ -427,18 +420,22 @@ class OpinetClient:
             parsed.append(AreaCode(code=code, name=name, raw=row))
         return parsed
 
-    def get_national_average_price(self) -> list[AvgPrice]:
+    async def get_national_average_price(self) -> list[AvgPrice]:
         """전국 주유소 평균가격을 조회한다.
 
         ``avgAllPrice.do``(apiId=4)를 호출하며 날짜와 가격 필드는 각각
         ``date``와 ``float``로 변환된다.
         """
-        endpoint = "avgAllPrice.do"
-        parsed = self._parse_national_average_price_response(self._require_http().get(endpoint))
-        self._handle_empty(parsed, endpoint)
-        return parsed
+        try:
+            endpoint = "avgAllPrice.do"
+            parsed = self._parse_national_average_price_response((await self._require_http().get(endpoint)))
+            self._handle_empty(parsed, endpoint)
+            return parsed
+        except OpinetError as exc:
+            exc.args = (_redact(str(exc), self.api_key),)
+            raise exc from None
 
-    def get_lowest_price_top20(
+    async def get_lowest_price_top20(
         self,
         prodcd: ProductCode | str,
         cnt: int = 10,
@@ -448,24 +445,28 @@ class OpinetClient:
 
         ``lowTop10.do``(apiId=2)를 호출하며 ``cnt``는 1~20만 허용한다.
         """
-        if not 1 <= cnt <= 20:
-            raise OpinetInvalidParameterError("cnt must be between 1 and 20")
-        if area is not None:
-            _validate_area_param(area)
-        endpoint = "lowTop10.do"
-        product_code = _coerce_product_code(prodcd)
-        params: dict[str, Any] = {"prodcd": product_code.value, "cnt": cnt}
-        if area is not None:
-            params["area"] = area
-        parsed = self._parse_station_list_response(
-            self._require_http().get(endpoint, params=params),
-            endpoint,
-            request_product_code=product_code,
-        )
-        self._handle_empty(parsed, endpoint)
-        return parsed
+        try:
+            if not 1 <= cnt <= 20:
+                raise OpinetInvalidParameterError("cnt must be between 1 and 20")
+            if area is not None:
+                _validate_area_param(area)
+            endpoint = "lowTop10.do"
+            product_code = _coerce_product_code(prodcd)
+            params: dict[str, Any] = {"prodcd": product_code.value, "cnt": cnt}
+            if area is not None:
+                params["area"] = area
+            parsed = self._parse_station_list_response(
+                (await self._require_http().get(endpoint, params=params)),
+                endpoint,
+                request_product_code=product_code,
+            )
+            self._handle_empty(parsed, endpoint)
+            return parsed
+        except OpinetError as exc:
+            exc.args = (_redact(str(exc), self.api_key),)
+            raise exc from None
 
-    def search_stations_around(
+    async def search_stations_around(
         self,
         *,
         lon: float | None = None,
@@ -481,58 +482,70 @@ class OpinetClient:
         ``aroundAll.do``(apiId=3)를 호출한다. 공개 입력은 WGS84 ``lon``/``lat``
         또는 오피넷 KATEC ``katec_x``/``katec_y`` 쌍 중 하나만 받는다.
         """
-        if not 1 <= radius_m <= 5000:
-            raise OpinetInvalidParameterError("radius_m must be between 1 and 5000")
-        x, y = _coordinate_query_params(lon=lon, lat=lat, katec_x=katec_x, katec_y=katec_y)
+        try:
+            if not 1 <= radius_m <= 5000:
+                raise OpinetInvalidParameterError("radius_m must be between 1 and 5000")
+            x, y = _coordinate_query_params(lon=lon, lat=lat, katec_x=katec_x, katec_y=katec_y)
 
-        product_code = _coerce_product_code(prodcd)
-        sort_order = _coerce_sort_order(sort)
-        endpoint = "aroundAll.do"
-        parsed = self._parse_station_list_response(
-            self._require_http().get(
+            product_code = _coerce_product_code(prodcd)
+            sort_order = _coerce_sort_order(sort)
+            endpoint = "aroundAll.do"
+            parsed = self._parse_station_list_response(
+                (await self._require_http().get(
+                    endpoint,
+                    params={
+                        "x": x,
+                        "y": y,
+                        "radius": radius_m,
+                        "prodcd": product_code.value,
+                        "sort": sort_order.value,
+                    },
+                )),
                 endpoint,
-                params={
-                    "x": x,
-                    "y": y,
-                    "radius": radius_m,
-                    "prodcd": product_code.value,
-                    "sort": sort_order.value,
-                },
-            ),
-            endpoint,
-            request_product_code=product_code,
-        )
-        self._handle_empty(parsed, endpoint)
-        return parsed
+                request_product_code=product_code,
+            )
+            self._handle_empty(parsed, endpoint)
+            return parsed
+        except OpinetError as exc:
+            exc.args = (_redact(str(exc), self.api_key),)
+            raise exc from None
 
-    def get_station_detail(self, uni_id: str) -> StationDetail:
+    async def get_station_detail(self, uni_id: str) -> StationDetail:
         """주유소 ID로 상세정보를 조회한다.
 
         ``detailById.do``(apiId=1)를 호출한다. ``LPG_YN``은
         ``station_type``으로, ``KPETRO_YN``은 ``is_kpetro``로 매핑한다.
         """
-        if not uni_id:
-            raise OpinetInvalidParameterError("uni_id must not be empty")
-        endpoint = "detailById.do"
-        return self._parse_station_detail_response(self._require_http().get(endpoint, params={"id": uni_id}))
+        try:
+            if not uni_id:
+                raise OpinetInvalidParameterError("uni_id must not be empty")
+            endpoint = "detailById.do"
+            return self._parse_station_detail_response((await self._require_http().get(endpoint, params={"id": uni_id})))
+        except OpinetError as exc:
+            exc.args = (_redact(str(exc), self.api_key),)
+            raise exc from None
 
-    def get_area_codes(self, sido: str | None = None) -> list[AreaCode]:
+    async def get_area_codes(self, sido: str | None = None) -> list[AreaCode]:
         """시도 또는 시군구 코드를 조회한다.
 
         ``areaCode.do``(apiId=5)를 호출하며 코드값은 선행 0을 보존하는
         ``str``로 반환한다.
         """
-        if sido is not None and (len(sido) != 2 or not sido.isdigit()):
-            raise OpinetInvalidParameterError("sido must be a 2-digit code")
-        if sido is not None:
-            opinet_sido_to_bjd(sido)
-        endpoint = "areaCode.do"
-        params = {"area": sido} if sido is not None else None
-        parsed = self._parse_area_codes_response(self._require_http().get(endpoint, params=params))
-        self._handle_empty(parsed, endpoint)
-        return parsed
+        try:
+            if sido is not None and (len(sido) != 2 or not sido.isdigit()):
+                raise OpinetInvalidParameterError("sido must be a 2-digit code")
+            if sido is not None:
+                opinet_sido_to_bjd(sido)
+            endpoint = "areaCode.do"
+            params = {"area": sido} if sido is not None else None
+            parsed = self._parse_area_codes_response((await self._require_http().get(endpoint, params=params)))
+            self._handle_empty(parsed, endpoint)
+            return parsed
+        except OpinetError as exc:
+            exc.args = (_redact(str(exc), self.api_key),)
+            raise exc from None
 
-    def iter_stations_in_bbox(
+    async def iter_stations_in_bbox(
         self,
         *,
         min_lon: float,
@@ -542,7 +555,7 @@ class OpinetClient:
         radius_m: int = 5000,
         prodcd: ProductCode | str = ProductCode.GASOLINE,
         sort: SortOrder | str = SortOrder.PRICE,
-    ) -> Iterator[Station]:
+    ) -> AsyncIterator[Station]:
         """WGS84 bbox 내 주유소를 ``uni_id`` 기준 중복 제거하며 순회한다(근사 enumeration).
 
         **OpiNet OpenAPI에는 지역/전국 단위 주유소 목록(bulk) 엔드포인트가 없다**
@@ -559,31 +572,35 @@ class OpinetClient:
         - ``aroundAll``은 ``tel``/``lpg_yn``(주유소 유형)을 주지 않는다. 이 필드가
           필요하면 ``uni_id``로 ``get_station_detail``을 별도 호출(N+1)해야 한다.
         """
-        seen: set[str] = set()
-        for center_lon, center_lat in _bbox_grid_centers(
-            min_lon=min_lon,
-            min_lat=min_lat,
-            max_lon=max_lon,
-            max_lat=max_lat,
-            radius_m=radius_m,
-        ):
-            try:
-                stations = self.search_stations_around(
-                    lon=center_lon,
-                    lat=center_lat,
-                    radius_m=radius_m,
-                    prodcd=prodcd,
-                    sort=sort,
-                )
-            except OpinetNoDataError:
-                continue
-            for station in stations:
-                if station.uni_id in seen:
+        try:
+            seen: set[str] = set()
+            for center_lon, center_lat in _bbox_grid_centers(
+                min_lon=min_lon,
+                min_lat=min_lat,
+                max_lon=max_lon,
+                max_lat=max_lat,
+                radius_m=radius_m,
+            ):
+                try:
+                    stations = (await self.search_stations_around(
+                        lon=center_lon,
+                        lat=center_lat,
+                        radius_m=radius_m,
+                        prodcd=prodcd,
+                        sort=sort,
+                    ))
+                except OpinetNoDataError:
                     continue
-                seen.add(station.uni_id)
-                yield station
+                for station in stations:
+                    if station.uni_id in seen:
+                        continue
+                    seen.add(station.uni_id)
+                    yield station
+        except OpinetError as exc:
+            exc.args = (_redact(str(exc), self.api_key),)
+            raise exc from None
 
-    def resolve_sigungu_bjd_code(
+    async def resolve_sigungu_bjd_code(
         self,
         sigungu_code: str,
         *,
@@ -591,13 +608,17 @@ class OpinetClient:
     ) -> OpinetSigunguBjdMapping:
         """VWorld 행정구역 검색으로 오피넷 시군구 코드를 법정동 코드로 해석한다."""
 
-        from .vworld import resolve_sigungu_bjd_code
+        try:
+            from .vworld import resolve_sigungu_bjd_code
 
-        return resolve_sigungu_bjd_code(
-            sigungu_code,
-            opinet_client=self,
-            vworld_client=vworld_client,
-        )
+            return (await resolve_sigungu_bjd_code(
+                sigungu_code,
+                opinet_client=self,
+                vworld_client=vworld_client,
+            ))
+        except OpinetError as exc:
+            exc.args = (_redact(str(exc), self.api_key),)
+            raise exc from None
 
     def _build_station(
         self,
@@ -630,7 +651,7 @@ class OpinetClient:
                 raw=row,
             )
         except (ValueError, KeyError) as exc:
-            raise _parse_error(endpoint, exc) from exc
+            raise OpinetServerError(_redact(str(_parse_error(endpoint, exc)), getattr(self, "api_key", None))) from None
 
     def _build_station_detail(self, row: dict[str, Any], endpoint: str) -> StationDetail:
         try:
@@ -666,7 +687,7 @@ class OpinetClient:
                 raw=row,
             )
         except (ValueError, KeyError) as exc:
-            raise _parse_error(endpoint, exc) from exc
+            raise OpinetServerError(_redact(str(_parse_error(endpoint, exc)), getattr(self, "api_key", None))) from None
 
     def _build_oil_price(self, row: dict[str, Any], endpoint: str) -> OilPrice:
         try:
@@ -678,198 +699,4 @@ class OpinetClient:
                 raw=row,
             )
         except (ValueError, KeyError) as exc:
-            raise _parse_error(endpoint, exc) from exc
-
-
-class AsyncOpinetClient:
-    """Asyncio-friendly Opinet client backed by ``httpx.AsyncClient``."""
-
-    def __init__(
-        self,
-        api_key: str | None = None,
-        *,
-        timeout: float = 10.0,
-        strict_empty: bool = False,
-        max_retries: int = 2,
-        retry_backoff: float = 0.5,
-        session: Any | None = None,
-    ) -> None:
-        self.config = OpinetConfig.from_env(
-            api_key=api_key,
-            timeout=timeout,
-            strict_empty=strict_empty,
-            max_retries=max_retries,
-            retry_backoff=retry_backoff,
-        )
-        self.api_key = self.config.api_key
-        self.timeout = self.config.timeout
-        self.strict_empty = self.config.strict_empty
-        self._transport = (
-            _AsyncOpinetHttp(
-                self.api_key,
-                timeout=self.config.timeout,
-                max_retries=self.config.max_retries,
-                retry_backoff=self.config.retry_backoff,
-                session=session,
-            )
-            if self.api_key
-            else None
-        )
-        self._http = self._transport
-        self.closed = False
-        self._parser: OpinetClient = OpinetClient.__new__(OpinetClient)
-        self._parser.config = self.config
-        self._parser.api_key = self.api_key
-        self._parser.timeout = self.timeout
-        self._parser._transport = None
-        self._parser._http = None
-        self._parser.closed = False
-
-    def _require_http(self) -> _AsyncOpinetHttp:
-        if self._http is None:
-            raise OpinetAuthError("OPINET_API_KEY is not set and api_key was not provided")
-        return self._http
-
-    async def aclose(self) -> None:
-        if self._http is not None:
-            await self._http.aclose()
-        self.closed = True
-
-    async def __aenter__(self) -> "AsyncOpinetClient":
-        return self
-
-    async def __aexit__(self, exc_type: Any, exc: Any, traceback: Any) -> None:
-        await self.aclose()
-
-    def close(self) -> None:
-        raise TypeError("AsyncOpinetClient.close() is not supported; use await aclose()")
-
-    def debug(self) -> OpinetDebugClient:
-        raise TypeError(
-            "AsyncOpinetClient does not support the sync debug helper; "
-            "construct a separate OpinetClient for debug recording"
-        )
-
-    async def get_national_average_price(self) -> list[AvgPrice]:
-        endpoint = "avgAllPrice.do"
-        parsed = self._parser._parse_national_average_price_response(await self._require_http().get(endpoint))
-        self._parser._handle_empty(parsed, endpoint, self.strict_empty)
-        return parsed
-
-    async def get_lowest_price_top20(
-        self,
-        prodcd: ProductCode | str,
-        cnt: int = 10,
-        area: str | None = None,
-    ) -> list[Station]:
-        if not 1 <= cnt <= 20:
-            raise OpinetInvalidParameterError("cnt must be between 1 and 20")
-        if area is not None:
-            _validate_area_param(area)
-        endpoint = "lowTop10.do"
-        product_code = _coerce_product_code(prodcd)
-        params: dict[str, Any] = {"prodcd": product_code.value, "cnt": cnt}
-        if area is not None:
-            params["area"] = area
-        parsed = self._parser._parse_station_list_response(
-            await self._require_http().get(endpoint, params=params),
-            endpoint,
-            request_product_code=product_code,
-        )
-        self._parser._handle_empty(parsed, endpoint, self.strict_empty)
-        return parsed
-
-    async def search_stations_around(
-        self,
-        *,
-        lon: float | None = None,
-        lat: float | None = None,
-        katec_x: float | None = None,
-        katec_y: float | None = None,
-        radius_m: int = 5000,
-        prodcd: ProductCode | str = ProductCode.GASOLINE,
-        sort: SortOrder | str = SortOrder.PRICE,
-    ) -> list[Station]:
-        if not 1 <= radius_m <= 5000:
-            raise OpinetInvalidParameterError("radius_m must be between 1 and 5000")
-        x, y = _coordinate_query_params(lon=lon, lat=lat, katec_x=katec_x, katec_y=katec_y)
-
-        product_code = _coerce_product_code(prodcd)
-        sort_order = _coerce_sort_order(sort)
-        endpoint = "aroundAll.do"
-        parsed = self._parser._parse_station_list_response(
-            await self._require_http().get(
-                endpoint,
-                params={
-                    "x": x,
-                    "y": y,
-                    "radius": radius_m,
-                    "prodcd": product_code.value,
-                    "sort": sort_order.value,
-                },
-            ),
-            endpoint,
-            request_product_code=product_code,
-        )
-        self._parser._handle_empty(parsed, endpoint, self.strict_empty)
-        return parsed
-
-    async def get_station_detail(self, uni_id: str) -> StationDetail:
-        if not uni_id:
-            raise OpinetInvalidParameterError("uni_id must not be empty")
-        endpoint = "detailById.do"
-        return self._parser._parse_station_detail_response(
-            await self._require_http().get(endpoint, params={"id": uni_id})
-        )
-
-    async def get_area_codes(self, sido: str | None = None) -> list[AreaCode]:
-        if sido is not None and (len(sido) != 2 or not sido.isdigit()):
-            raise OpinetInvalidParameterError("sido must be a 2-digit code")
-        if sido is not None:
-            opinet_sido_to_bjd(sido)
-        endpoint = "areaCode.do"
-        params = {"area": sido} if sido is not None else None
-        parsed = self._parser._parse_area_codes_response(await self._require_http().get(endpoint, params=params))
-        self._parser._handle_empty(parsed, endpoint, self.strict_empty)
-        return parsed
-
-    async def iter_stations_in_bbox(
-        self,
-        *,
-        min_lon: float,
-        min_lat: float,
-        max_lon: float,
-        max_lat: float,
-        radius_m: int = 5000,
-        prodcd: ProductCode | str = ProductCode.GASOLINE,
-        sort: SortOrder | str = SortOrder.PRICE,
-    ) -> AsyncIterator[Station]:
-        """WGS84 bbox 내 주유소를 ``uni_id`` 기준 dedup하며 순회한다(근사 enumeration).
-
-        sync ``OpinetClient.iter_stations_in_bbox``의 async 버전. OpiNet은 지역/전국
-        bulk 엔드포인트가 없어 ``aroundAll``(반경 ≤5km)을 bbox 격자로 호출+dedup한다.
-        호출 수·쿼터 주의와 ``tel``/``lpg_yn`` 부재(detail N+1 필요)는 sync 버전과 동일.
-        """
-        seen: set[str] = set()
-        for center_lon, center_lat in _bbox_grid_centers(
-            min_lon=min_lon,
-            min_lat=min_lat,
-            max_lon=max_lon,
-            max_lat=max_lat,
-            radius_m=radius_m,
-        ):
-            try:
-                stations = await self.search_stations_around(
-                    lon=center_lon,
-                    lat=center_lat,
-                    radius_m=radius_m,
-                    prodcd=prodcd,
-                    sort=sort,
-                )
-            except OpinetNoDataError:
-                continue
-            for station in stations:
-                if station.uni_id in seen:
-                    continue
-                seen.add(station.uni_id)
-                yield station
+            raise OpinetServerError(_redact(str(_parse_error(endpoint, exc)), getattr(self, "api_key", None))) from None

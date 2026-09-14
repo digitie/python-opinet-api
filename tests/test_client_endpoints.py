@@ -5,10 +5,10 @@ import pytest
 from opinet import BrandCode, OpinetClient, ProductCode, SortOrder, StationType
 from opinet.exceptions import OpinetAuthError, OpinetInvalidParameterError, OpinetNoDataError, OpinetServerError
 
-def test_avg_all_price_types(client, load_fixture, mock_opinet):
+async def test_avg_all_price_types(client, load_fixture, mock_opinet):
     mock_opinet.add("avgAllPrice.do", json=load_fixture("avg_all_price.json"))
 
-    rows = client.get_national_average_price()
+    rows = (await client.get_national_average_price())
 
     assert len(rows) == 5
     first = rows[0]
@@ -27,46 +27,46 @@ def test_avg_all_price_types(client, load_fixture, mock_opinet):
     assert query["out"] == ["json"]
 
 
-def test_avg_empty_default_and_strict(load_fixture, mock_opinet):
+async def test_avg_empty_default_and_strict(load_fixture, mock_opinet):
     mock_opinet.add("avgAllPrice.do", json=load_fixture("empty_oil.json"))
-    assert OpinetClient("test-key", retry_backoff=0).get_national_average_price() == []
+    assert (await OpinetClient("test-key", retry_backoff=0).get_national_average_price()) == []
 
     mock_opinet.add("avgAllPrice.do", json=load_fixture("empty_oil.json"))
     with pytest.raises(OpinetNoDataError):
-        OpinetClient("test-key", retry_backoff=0, strict_empty=True).get_national_average_price()
+        (await OpinetClient("test-key", retry_backoff=0, strict_empty=True).get_national_average_price())
 
 
-def test_avg_bad_date_is_server_error(load_fixture, mock_opinet):
+async def test_avg_bad_date_is_server_error(load_fixture, mock_opinet):
     payload = load_fixture("avg_all_price.json")
     payload["RESULT"]["OIL"][0]["TRADE_DT"] = "2025-07-23"
     mock_opinet.add("avgAllPrice.do", json=payload)
 
     with pytest.raises(OpinetServerError):
-        OpinetClient("test-key", retry_backoff=0).get_national_average_price()
+        (await OpinetClient("test-key", retry_backoff=0).get_national_average_price())
 
 
-def test_avg_accepts_single_oil_object(load_fixture, mock_opinet):
+async def test_avg_accepts_single_oil_object(load_fixture, mock_opinet):
     payload = load_fixture("avg_all_price.json")
     payload["RESULT"]["OIL"] = payload["RESULT"]["OIL"][0]
     mock_opinet.add("avgAllPrice.do", json=payload)
 
-    rows = OpinetClient("test-key", retry_backoff=0).get_national_average_price()
+    rows = (await OpinetClient("test-key", retry_backoff=0).get_national_average_price())
 
     assert len(rows) == 1
     assert rows[0].product_code is ProductCode.GASOLINE_PREMIUM
 
 
-def test_avg_rejects_non_object_oil_items(mock_opinet):
+async def test_avg_rejects_non_object_oil_items(mock_opinet):
     mock_opinet.add("avgAllPrice.do", json={"RESULT": {"OIL": ["bad"]}})
 
     with pytest.raises(OpinetServerError):
-        OpinetClient("test-key", retry_backoff=0).get_national_average_price()
+        (await OpinetClient("test-key", retry_backoff=0).get_national_average_price())
 
 
-def test_lowest_price_types_and_params(client, load_fixture, mock_opinet):
+async def test_lowest_price_types_and_params(client, load_fixture, mock_opinet):
     mock_opinet.add("lowTop10.do", json=load_fixture("low_top10_B027.json"))
 
-    stations = client.get_lowest_price_top20(ProductCode.GASOLINE, cnt=2, area="01")
+    stations = (await client.get_lowest_price_top20(ProductCode.GASOLINE, cnt=2, area="01"))
 
     assert len(stations) == 2
     first = stations[0]
@@ -100,30 +100,30 @@ def test_lowest_price_types_and_params(client, load_fixture, mock_opinet):
         {"cnt": 10, "area": "abcd"},
     ],
 )
-def test_lowest_price_invalid_params(client, kwargs):
+async def test_lowest_price_invalid_params(client, kwargs):
     with pytest.raises(OpinetInvalidParameterError):
-        client.get_lowest_price_top20(ProductCode.GASOLINE, **kwargs)
+        (await client.get_lowest_price_top20(ProductCode.GASOLINE, **kwargs))
 
 
-def test_lowest_price_unknown_brand_is_server_error(load_fixture, mock_opinet):
+async def test_lowest_price_unknown_brand_is_server_error(load_fixture, mock_opinet):
     payload = load_fixture("low_top10_B027.json")
     payload["RESULT"]["OIL"][0]["POLL_DIV_CO"] = "BAD"
     mock_opinet.add("lowTop10.do", json=payload)
 
     with pytest.raises(OpinetServerError):
-        OpinetClient("test-key", retry_backoff=0).get_lowest_price_top20(ProductCode.GASOLINE)
+        (await OpinetClient("test-key", retry_backoff=0).get_lowest_price_top20(ProductCode.GASOLINE))
 
 
-def test_around_all_wgs84_types_and_query(client, load_fixture, mock_opinet):
+async def test_around_all_wgs84_types_and_query(client, load_fixture, mock_opinet):
     mock_opinet.add("aroundAll.do", json=load_fixture("around_all_gangnam.json"))
 
-    stations = client.search_stations_around(
+    stations = (await client.search_stations_around(
         lon=127.0276,
         lat=37.4979,
         radius_m=3000,
         prodcd=ProductCode.GASOLINE,
         sort=SortOrder.PRICE,
-    )
+    ))
 
     first = stations[0]
     assert first.uni_id == "A0010207"
@@ -142,20 +142,20 @@ def test_around_all_wgs84_types_and_query(client, load_fixture, mock_opinet):
     assert float(query["y"][0]) != pytest.approx(37.4979)
 
 
-def test_around_all_place_coordinate_query(client, load_fixture, mock_opinet):
+async def test_around_all_place_coordinate_query(client, load_fixture, mock_opinet):
     mock_opinet.add("aroundAll.do", json=load_fixture("around_all_gangnam.json"))
 
-    client.search_stations_around(lon=127.0276, lat=37.4979, radius_m=1000)
+    (await client.search_stations_around(lon=127.0276, lat=37.4979, radius_m=1000))
 
     query = mock_opinet.query()
     assert float(query["x"][0]) == pytest.approx(314213.3092)
     assert float(query["y"][0]) == pytest.approx(544413.5797)
 
 
-def test_around_all_katec_query(client, load_fixture, mock_opinet):
+async def test_around_all_katec_query(client, load_fixture, mock_opinet):
     mock_opinet.add("aroundAll.do", json=load_fixture("around_all_gangnam.json"))
 
-    client.search_stations_around(katec_x=314871.8, katec_y=544012.0, radius_m=1000, sort=SortOrder.DISTANCE)
+    (await client.search_stations_around(katec_x=314871.8, katec_y=544012.0, radius_m=1000, sort=SortOrder.DISTANCE))
 
     query = mock_opinet.query()
     assert float(query["x"][0]) == pytest.approx(314871.8)
@@ -174,15 +174,15 @@ def test_around_all_katec_query(client, load_fixture, mock_opinet):
         {"katec_x": 300000.0},
     ],
 )
-def test_around_invalid_params(client, kwargs):
+async def test_around_invalid_params(client, kwargs):
     with pytest.raises(OpinetInvalidParameterError):
-        client.search_stations_around(**kwargs)
+        (await client.search_stations_around(**kwargs))
 
 
-def test_detail_full_type_mapping(client, load_fixture, mock_opinet):
+async def test_detail_full_type_mapping(client, load_fixture, mock_opinet):
     mock_opinet.add("detailById.do", json=load_fixture("detail_by_id_A0010207.json"))
 
-    detail = client.get_station_detail("A0010207")
+    detail = (await client.get_station_detail("A0010207"))
 
     assert detail.uni_id == "A0010207"
     assert detail.name == "SK서광주유소"
@@ -217,42 +217,42 @@ def test_detail_full_type_mapping(client, load_fixture, mock_opinet):
     assert query["id"] == ["A0010207"]
 
 
-def test_detail_wraps_single_oil_price(load_fixture, mock_opinet):
+async def test_detail_wraps_single_oil_price(load_fixture, mock_opinet):
     payload = load_fixture("detail_by_id_A0010207.json")
     payload["RESULT"]["OIL"]["OIL_PRICE"] = payload["RESULT"]["OIL"]["OIL_PRICE"][0]
     mock_opinet.add("detailById.do", json=payload)
 
-    detail = OpinetClient("test-key", retry_backoff=0).get_station_detail("A0010207")
+    detail = (await OpinetClient("test-key", retry_backoff=0).get_station_detail("A0010207"))
 
     assert len(detail.prices) == 1
     assert detail.prices[0].product_code is ProductCode.GASOLINE
 
 
-def test_detail_rejects_invalid_oil_price_shape(load_fixture, mock_opinet):
+async def test_detail_rejects_invalid_oil_price_shape(load_fixture, mock_opinet):
     payload = load_fixture("detail_by_id_A0010207.json")
     payload["RESULT"]["OIL"]["OIL_PRICE"] = "bad"
     mock_opinet.add("detailById.do", json=payload)
 
     with pytest.raises(OpinetServerError):
-        OpinetClient("test-key", retry_backoff=0).get_station_detail("A0010207")
+        (await OpinetClient("test-key", retry_backoff=0).get_station_detail("A0010207"))
 
 
-def test_detail_empty_raises(load_fixture, mock_opinet):
+async def test_detail_empty_raises(load_fixture, mock_opinet):
     mock_opinet.add("detailById.do", json=load_fixture("empty_oil.json"))
 
     with pytest.raises(OpinetNoDataError):
-        OpinetClient("test-key", retry_backoff=0).get_station_detail("A0000000")
+        (await OpinetClient("test-key", retry_backoff=0).get_station_detail("A0000000"))
 
 
-def test_detail_invalid_id(client):
+async def test_detail_invalid_id(client):
     with pytest.raises(OpinetInvalidParameterError):
-        client.get_station_detail("")
+        (await client.get_station_detail(""))
 
 
-def test_area_codes_root(client, load_fixture, mock_opinet):
+async def test_area_codes_root(client, load_fixture, mock_opinet):
     mock_opinet.add("areaCode.do", json=load_fixture("area_code_root.json"))
 
-    rows = client.get_area_codes()
+    rows = (await client.get_area_codes())
 
     assert len(rows) == 17
     assert rows[0].code == "01"
@@ -263,10 +263,10 @@ def test_area_codes_root(client, load_fixture, mock_opinet):
     assert all(isinstance(row.code, str) for row in rows)
 
 
-def test_area_codes_sido_query(client, load_fixture, mock_opinet):
+async def test_area_codes_sido_query(client, load_fixture, mock_opinet):
     mock_opinet.add("areaCode.do", json=load_fixture("area_code_sido_01.json"))
 
-    rows = client.get_area_codes("01")
+    rows = (await client.get_area_codes("01"))
 
     assert rows[1].code == "0113"
     assert rows[1].is_sigungu is True
@@ -275,36 +275,36 @@ def test_area_codes_sido_query(client, load_fixture, mock_opinet):
 
 
 @pytest.mark.parametrize("sido", ["1", "001", "ab", "12", "99"])
-def test_area_codes_invalid_sido(client, sido):
+async def test_area_codes_invalid_sido(client, sido):
     with pytest.raises(OpinetInvalidParameterError):
-        client.get_area_codes(sido)
+        (await client.get_area_codes(sido))
 
 
-def test_area_codes_missing_name_is_server_error(mock_opinet):
+async def test_area_codes_missing_name_is_server_error(mock_opinet):
     mock_opinet.add("areaCode.do", json={"RESULT": {"OIL": [{"AREA_CD": "01"}]}})
 
     with pytest.raises(OpinetServerError):
-        OpinetClient("test-key", retry_backoff=0).get_area_codes()
+        (await OpinetClient("test-key", retry_backoff=0).get_area_codes())
 
 
-def test_missing_oil_is_server_error(mock_opinet):
+async def test_missing_oil_is_server_error(mock_opinet):
     mock_opinet.add("areaCode.do", json={"RESULT": {}})
 
     with pytest.raises(OpinetServerError):
-        OpinetClient("test-key", retry_backoff=0).get_area_codes()
+        (await OpinetClient("test-key", retry_backoff=0).get_area_codes())
 
 
-def test_missing_api_key_raises_auth_error(monkeypatch, tmp_path):
+async def test_missing_api_key_raises_auth_error(monkeypatch, tmp_path):
     monkeypatch.chdir(tmp_path)
     monkeypatch.delenv("OPINET_API_KEY", raising=False)
     client = OpinetClient(retry_backoff=0)
 
     with pytest.raises(OpinetAuthError):
-        client.get_area_codes()
+        (await client.get_area_codes())
 
 
-def test_sync_client_context_manager_closes_transport():
-    with OpinetClient("test-key", retry_backoff=0) as client:
+async def test_sync_client_context_manager_closes_transport():
+    async with OpinetClient("test-key", retry_backoff=0) as client:
         assert client.closed is False
 
     assert client.closed is True

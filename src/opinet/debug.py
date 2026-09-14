@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import copy
 import re
 import traceback
 from collections.abc import Mapping as MappingABC
@@ -11,12 +12,13 @@ from datetime import date, datetime, time
 from enum import Enum
 from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
+from types import MappingProxyType
 from typing import Any
 from zoneinfo import ZoneInfo
 
 from pydantic import BaseModel
 
-from ._http import _OpinetHttp
+from ._http import AsyncHttpxTransport, _redact
 from .catalog import ApiCatalogItem, ApiParameter, get_api_catalog_item
 from .client import OpinetClient, _coerce_product_code, _coerce_sort_order, _coordinate_query_params, _validate_area_param
 from .codes import ProductCode, SortOrder
@@ -112,8 +114,10 @@ def jsonable(obj: Any) -> Any:
     return str(obj)
 
 
-def redact_sensitive(obj: Any) -> Any:
+def redact_sensitive(obj: Any, *, api_key: str | None = None) -> Any:
     """fixture 저장 전에 인증/토큰 계열 값을 재귀적으로 마스킹한다."""
+    if isinstance(obj, Enum):
+        return obj
     if isinstance(obj, MappingABC):
         redacted: dict[str, Any] = {}
         for key, value in obj.items():
@@ -121,10 +125,21 @@ def redact_sensitive(obj: Any) -> Any:
             if key_text.strip().lower() in SENSITIVE_KEYS:
                 redacted[key_text] = "<REDACTED>"
             else:
-                redacted[key_text] = redact_sensitive(value)
-        return redacted
+                redacted[key_text] = redact_sensitive(value, api_key=api_key)
+        return MappingProxyType(redacted) if isinstance(obj, MappingProxyType) else redacted
+    if isinstance(obj, tuple):
+        return tuple(redact_sensitive(value, api_key=api_key) for value in obj)
     if isinstance(obj, list | tuple | set | frozenset):
-        return [redact_sensitive(value) for value in obj]
+        return [redact_sensitive(value, api_key=api_key) for value in obj]
+    if isinstance(obj, str):
+        return _redact(obj, api_key)
+    if isinstance(obj, BaseModel):
+        return obj.model_copy(update={name: redact_sensitive(getattr(obj, name), api_key=api_key) for name in type(obj).model_fields})
+    if is_dataclass(obj) and not isinstance(obj, type):
+        safe = copy.copy(obj)
+        for item in fields(obj):
+            object.__setattr__(safe, item.name, redact_sensitive(getattr(obj, item.name), api_key=api_key))
+        return safe
     return obj
 
 
@@ -238,10 +253,12 @@ def parse_debug_response(
     response_body: dict[str, Any],
     *,
     input_data: MappingABC[str, Any] | None = None,
+    api_key: str | None = None,
 ) -> Any:
     """fixture의 raw response body를 공식 클라이언트 모델로 파싱한다."""
     client = OpinetClient.__new__(OpinetClient)
     client.strict_empty = False
+    client.api_key = api_key
     input_data = input_data or {}
     if function_name == "get_national_average_price":
         return client._parse_national_average_price_response(response_body)
@@ -345,33 +362,6 @@ def assert_case(actual: Any, expected: Any, assertion: MappingABC[str, Any] | No
     raise ValueError(f"Unknown assertion mode: {mode}")
 
 
-class _RecordingTransport:
-    """실제 transport로 위임하면서 각 ``get()`` 호출을 기록하는 얇은 proxy.
-
-    ``debug_fetch()``가 공개 client 메서드를 그대로 호출하면서도 Debug Trace/
-    Fixture 탭에 보여줄 실제 요청/응답을 얻기 위해 쓴다. ``_OpinetHttp``는
-    ``slots=True`` dataclass라 인스턴스 메서드를 monkeypatch할 수 없어 이 proxy로
-    ``OpinetClient._http``를 통째로 바꿔치기하는 방식을 쓴다.
-    """
-
-    def __init__(self, inner: Any, calls: list[dict[str, Any]]) -> None:
-        self._inner = inner
-        self._calls = calls
-
-    def get(self, endpoint: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
-        body = self._inner.get(endpoint, params=params)
-        self._calls.append(
-            {
-                "endpoint": endpoint,
-                "params": dict(params) if params else {},
-                "status_code": getattr(self._inner, "_last_status_code", None),
-                "body": body,
-            }
-        )
-        return body
-
-    def __getattr__(self, name: str) -> Any:
-        return getattr(self._inner, name)
 
 
 class OpinetDebugClient:
@@ -380,7 +370,7 @@ class OpinetDebugClient:
     def __init__(self, client: OpinetClient) -> None:
         self._client = client
 
-    def debug_fetch(
+    async def debug_fetch(
         self,
         function_name: str,
         params: MappingABC[str, Any] | None = None,
@@ -409,7 +399,7 @@ class OpinetDebugClient:
             if raise_errors:
                 raise exc
             trace.append(f"failed: {type(exc).__name__}")
-            return DebugRun(
+            return self._safe_run(
                 function=function_name,
                 input=input_data,
                 request={},
@@ -425,9 +415,10 @@ class OpinetDebugClient:
             real_http = self._client._require_http()
         except Exception as exc:
             if raise_errors:
-                raise
+                exc.args = (_redact(str(exc), self._client.api_key),)
+                raise exc from None
             trace.append(f"transport unavailable: {type(exc).__name__}")
-            return DebugRun(
+            return self._safe_run(
                 function=function_name,
                 input=input_data,
                 request={},
@@ -439,39 +430,34 @@ class OpinetDebugClient:
                 error=_error_dict(exc),
             )
 
-        # ``_OpinetHttp``는 ``slots=True`` dataclass라 인스턴스에 새 속성을 못 붙인다.
-        # 그래서 메서드를 monkeypatch하는 대신 client의 transport 자체를 요청 동안만
-        # 기록용 얇은 proxy로 바꿔치기한다(원본은 finally에서 항상 복원).
-        calls: list[dict[str, Any]] = []
-        self._client._http = _RecordingTransport(real_http, calls)  # type: ignore[assignment]
-        try:
-            coerced = _coerce_debug_params(catalog_item, raw_params)
-            trace.append(f"coerced params: {sorted(coerced)}" if coerced else "no request parameters")
-            parsed = method(**coerced)
-            trace.append("received parsed response from client method")
-            processed = process_debug_result(function_name, parsed)
-            trace.append("converted parsed result into normalized records")
-        except Exception as exc:
-            if raise_errors:
-                raise
-            trace.append(f"failed: {type(exc).__name__}")
-            request, response = _snapshot_from_calls(calls)
-            return DebugRun(
-                function=function_name,
-                input=input_data,
-                request=request,
-                response=response,
-                parsed=None,
-                processed=None,
-                trace=tuple(trace),
-                catalog_item=catalog_item,
-                error=_error_dict(exc),
-            )
-        finally:
-            self._client._http = real_http
+        with real_http.capture_calls() as calls:
+            try:
+                coerced = _coerce_debug_params(catalog_item, raw_params)
+                trace.append(f"coerced params: {sorted(coerced)}" if coerced else "no request parameters")
+                parsed = await method(**coerced)
+                trace.append("received parsed response from client method")
+                processed = process_debug_result(function_name, parsed)
+                trace.append("converted parsed result into normalized records")
+            except Exception as exc:
+                if raise_errors:
+                    exc.args = (_redact(str(exc), self._client.api_key),)
+                    raise exc from None
+                trace.append(f"failed: {type(exc).__name__}")
+                request, response = _snapshot_from_calls(calls)
+                return self._safe_run(
+                    function=function_name,
+                    input=input_data,
+                    request=request,
+                    response=response,
+                    parsed=None,
+                    processed=None,
+                    trace=tuple(trace),
+                    catalog_item=catalog_item,
+                    error=_error_dict(exc),
+                )
 
         request, response = _snapshot_from_calls(calls)
-        return DebugRun(
+        return self._safe_run(
             function=function_name,
             input=input_data,
             request=request,
@@ -482,16 +468,16 @@ class OpinetDebugClient:
             catalog_item=catalog_item,
         )
 
-    def get_national_average_price(self, *, raise_errors: bool = False) -> DebugRun:
+    async def get_national_average_price(self, *, raise_errors: bool = False) -> DebugRun:
         """전국 평균가 API를 실행하고 디버그 결과를 반환한다."""
-        return self._run(
+        return (await self._run(
             function_name="get_national_average_price",
             input_data={},
             params=None,
             raise_errors=raise_errors,
-        )
+        ))
 
-    def get_lowest_price_top20(
+    async def get_lowest_price_top20(
         self,
         prodcd: ProductCode | str,
         cnt: int = 10,
@@ -512,14 +498,14 @@ class OpinetDebugClient:
                 params["area"] = area
         except Exception as exc:
             return self._error_run("get_lowest_price_top20", input_data, None, exc, raise_errors)
-        return self._run(
+        return (await self._run(
             function_name="get_lowest_price_top20",
             input_data=input_data,
             params=params,
             raise_errors=raise_errors,
-        )
+        ))
 
-    def search_stations_around(
+    async def search_stations_around(
         self,
         *,
         lon: float | None = None,
@@ -549,7 +535,7 @@ class OpinetDebugClient:
             sort_order = _coerce_sort_order(sort)
         except Exception as exc:
             return self._error_run("search_stations_around", input_data, None, exc, raise_errors)
-        return self._run(
+        return (await self._run(
             function_name="search_stations_around",
             input_data=input_data,
             params={
@@ -560,9 +546,9 @@ class OpinetDebugClient:
                 "sort": sort_order.value,
             },
             raise_errors=raise_errors,
-        )
+        ))
 
-    def get_station_detail(self, uni_id: str, *, raise_errors: bool = False) -> DebugRun:
+    async def get_station_detail(self, uni_id: str, *, raise_errors: bool = False) -> DebugRun:
         """주유소 상세 API를 실행하고 디버그 결과를 반환한다."""
         input_data = {"uni_id": uni_id}
         if not uni_id:
@@ -573,14 +559,14 @@ class OpinetDebugClient:
                 OpinetInvalidParameterError("uni_id must not be empty"),
                 raise_errors,
             )
-        return self._run(
+        return (await self._run(
             function_name="get_station_detail",
             input_data=input_data,
             params={"id": uni_id},
             raise_errors=raise_errors,
-        )
+        ))
 
-    def get_area_codes(self, sido: str | None = None, *, raise_errors: bool = False) -> DebugRun:
+    async def get_area_codes(self, sido: str | None = None, *, raise_errors: bool = False) -> DebugRun:
         """지역 코드 API를 실행하고 디버그 결과를 반환한다."""
         input_data = {"sido": sido}
         try:
@@ -590,14 +576,14 @@ class OpinetDebugClient:
                 _validate_area_param(sido)
         except Exception as exc:
             return self._error_run("get_area_codes", input_data, None, exc, raise_errors)
-        return self._run(
+        return (await self._run(
             function_name="get_area_codes",
             input_data=input_data,
             params={"area": sido} if sido is not None else None,
             raise_errors=raise_errors,
-        )
+        ))
 
-    def _run(
+    async def _run(
         self,
         *,
         function_name: str,
@@ -615,16 +601,17 @@ class OpinetDebugClient:
         ]
         try:
             http = self._client._require_http()
-            body = http.get(endpoint, params=params)
-            response = {"status_code": http._last_status_code, "headers": {}, "body": body}
+            with http.capture_calls() as calls:
+                body = await http.get(endpoint, params=params)
+            _, response = _snapshot_from_calls(calls)
             trace.append("received JSON response")
-            parsed = parse_debug_response(function_name, body, input_data=input_data)
+            parsed = parse_debug_response(function_name, body, input_data=input_data, api_key=self._client.api_key)
             if isinstance(parsed, list):
                 self._client._handle_empty(parsed, endpoint)
             trace.append("parsed response into client models")
             processed = process_debug_result(function_name, parsed)
             trace.append("converted parsed result into normalized records")
-            return DebugRun(
+            return self._safe_run(
                 function=function_name,
                 input=redact_sensitive(jsonable(input_data)),
                 request=request,
@@ -636,9 +623,10 @@ class OpinetDebugClient:
             )
         except Exception as exc:
             if raise_errors:
-                raise
+                exc.args = (_redact(str(exc), self._client.api_key),)
+                raise exc from None
             trace.append(f"failed: {type(exc).__name__}")
-            return DebugRun(
+            return self._safe_run(
                 function=function_name,
                 input=redact_sensitive(jsonable(input_data)),
                 request=request,
@@ -661,7 +649,7 @@ class OpinetDebugClient:
         if raise_errors:
             raise exc
         catalog_item = get_api_catalog_item(function_name=function_name)
-        return DebugRun(
+        return self._safe_run(
             function=function_name,
             input=redact_sensitive(jsonable(input_data)),
             request=_request_snapshot(catalog_item.endpoint, params),
@@ -677,6 +665,14 @@ class OpinetDebugClient:
             error=_error_dict(exc),
         )
 
+    def _safe_run(self, **values: Any) -> DebugRun:
+        """파싱을 마친 진단 결과만 복사·마스킹해 원본 모델 검증을 보존한다."""
+        for name in ("input", "request", "response", "parsed", "processed", "error"):
+            if name in values:
+                values[name] = redact_sensitive(values[name], api_key=self._client.api_key)
+        values["trace"] = tuple(_redact(value, self._client.api_key) for value in values["trace"])
+        return DebugRun(**values)
+
 
 def _request_snapshot(endpoint: str, params: dict[str, Any] | None) -> dict[str, Any]:
     query = {"certkey": "<REDACTED>", "out": "json"}
@@ -684,7 +680,7 @@ def _request_snapshot(endpoint: str, params: dict[str, Any] | None) -> dict[str,
         query.update(jsonable(params))
     return {
         "method": "GET",
-        "url": _OpinetHttp.BASE_URL + endpoint,
+        "url": AsyncHttpxTransport.BASE_URL + endpoint,
         "query": query,
         "headers": {},
     }

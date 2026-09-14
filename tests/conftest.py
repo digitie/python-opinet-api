@@ -64,8 +64,9 @@ def load_fixture() -> Any:
 
 
 @pytest.fixture
-def client() -> OpinetClient:
-    return OpinetClient(api_key="test-key", retry_backoff=0)
+async def client():
+    async with OpinetClient(api_key="test-key", retry_backoff=0, max_rps=10000) as value:
+        yield value
 
 
 class MockOpinetApi:
@@ -118,6 +119,7 @@ def live_api_key() -> str:
     return key
 
 
-@pytest.fixture(scope="session")
-def live_client(live_api_key: str) -> OpinetClient:
-    return OpinetClient(api_key=live_api_key, retry_backoff=0)
+@pytest.fixture
+async def live_client(live_api_key: str):
+    async with OpinetClient(api_key=live_api_key, retry_backoff=0) as value:
+        yield value
