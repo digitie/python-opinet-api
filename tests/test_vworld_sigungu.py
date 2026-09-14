@@ -20,7 +20,7 @@ class FakeOpinetClient:
             "10": [AreaCode(code="1002", name="해운대구")],
         }
 
-    def get_area_codes(self, sido: str | None = None) -> list[AreaCode]:
+    async def get_area_codes(self, sido: str | None = None) -> list[AreaCode]:
         if sido is None:
             return self.root
         return self.children.get(sido, [])
@@ -31,7 +31,7 @@ class FakeVworldClient:
         self.payloads = payloads
         self.calls: list[tuple[str, str, int]] = []
 
-    def search_district(self, query: str, *, category: str = "L2", size: int = 10) -> dict[str, Any]:
+    async def search_district(self, query: str, *, category: str = "L2", size: int = 10) -> dict[str, Any]:
         self.calls.append((query, category, size))
         return self.payloads.get(query, {"response": {"result": {"items": []}}})
 
@@ -40,7 +40,7 @@ def _payload(*items: dict[str, Any]) -> dict[str, Any]:
     return {"response": {"status": "OK", "result": {"items": list(items)}}}
 
 
-def test_resolve_sigungu_bjd_code_with_full_vworld_title() -> None:
+async def test_resolve_sigungu_bjd_code_with_full_vworld_title() -> None:
     vworld = FakeVworldClient(
         {
             "서울특별시 강남구": _payload(
@@ -53,11 +53,11 @@ def test_resolve_sigungu_bjd_code_with_full_vworld_title() -> None:
         }
     )
 
-    mapping = resolve_sigungu_bjd_code(
+    mapping = (await resolve_sigungu_bjd_code(
         "0113",
         opinet_client=FakeOpinetClient(),
         vworld_client=vworld,
-    )
+    ))
 
     assert isinstance(mapping, OpinetSigunguBjdMapping)
     assert mapping.opinet_sigungu_code == "0113"
@@ -70,7 +70,7 @@ def test_resolve_sigungu_bjd_code_with_full_vworld_title() -> None:
     assert vworld.calls == [("서울특별시 강남구", "L2", 10)]
 
 
-def test_resolve_sigungu_bjd_code_filters_ambiguous_districts_by_sido_prefix() -> None:
+async def test_resolve_sigungu_bjd_code_filters_ambiguous_districts_by_sido_prefix() -> None:
     vworld = FakeVworldClient(
         {
             "서울특별시 중구": _payload(
@@ -80,29 +80,29 @@ def test_resolve_sigungu_bjd_code_filters_ambiguous_districts_by_sido_prefix() -
         }
     )
 
-    mapping = resolve_sigungu_bjd_code(
+    mapping = (await resolve_sigungu_bjd_code(
         "0102",
         opinet_client=FakeOpinetClient(),
         vworld_client=vworld,
-    )
+    ))
 
     assert mapping.bjd_sigungu_code == "11140"
     assert mapping.vworld_title == "서울특별시 중구"
 
 
-def test_resolve_sigungu_bjd_code_rejects_non_sigungu_code() -> None:
+async def test_resolve_sigungu_bjd_code_rejects_non_sigungu_code() -> None:
     with pytest.raises(OpinetInvalidParameterError):
-        resolve_sigungu_bjd_code(
+        (await resolve_sigungu_bjd_code(
             "01",
             opinet_client=FakeOpinetClient(),
             vworld_client=FakeVworldClient({}),
-        )
+        ))
 
 
-def test_resolve_sigungu_bjd_code_raises_when_opinet_area_is_missing() -> None:
+async def test_resolve_sigungu_bjd_code_raises_when_opinet_area_is_missing() -> None:
     with pytest.raises(OpinetNoDataError):
-        resolve_sigungu_bjd_code(
+        (await resolve_sigungu_bjd_code(
             "0113",
             opinet_client=FakeOpinetClient(children={"01": []}),
             vworld_client=FakeVworldClient({}),
-        )
+        ))

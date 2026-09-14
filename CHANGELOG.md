@@ -1,5 +1,9 @@
 # Changelog
 
+## 2026-09-14 — async-only와 공통 TPS
+
+OpinetClient를 native async 하나로 통합했다. 모든 조회·디버그에 await, 격자 순회에 async for를 사용한다. 공통 AsyncTokenBucket, max_rps/rate_limiter를 공개하고 재시도·리다이렉트마다 TPS를 적용한다. 동기 HTTP·Async 접두사·aio를 제거하고 비동기 VWorld 연동과 동시 디버그를 지원한다.
+
 이 프로젝트의 주요 변경 사항을 기록합니다. 형식은 [Keep a Changelog](https://keepachangelog.com/ko/1.1.0/)를 따릅니다. 아직 PyPI에 배포되지 않았으므로 버전 태그 없이 모든 항목을 `[Unreleased]`에 시간순(최신 항목이 위)으로 기록합니다.
 
 ## [Unreleased]

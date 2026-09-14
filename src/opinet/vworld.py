@@ -4,7 +4,8 @@ from __future__ import annotations
 
 from collections.abc import Hashable, Mapping, Sequence
 from dataclasses import dataclass, field
-from functools import lru_cache
+import asyncio
+from weakref import WeakValueDictionary
 from types import MappingProxyType
 from typing import Any, Protocol
 
@@ -22,11 +23,11 @@ else:
 
 
 class _OpinetAreaClient(Hashable, Protocol):
-    def get_area_codes(self, sido: str | None = None) -> list[AreaCode]: ...
+    async def get_area_codes(self, sido: str | None = None) -> list[AreaCode]: ...
 
 
 class _VworldDistrictClient(Protocol):
-    def search_district(
+    async def search_district(
         self,
         query: str,
         *,
@@ -94,9 +95,20 @@ def _find_area(areas: Sequence[AreaCode], code: str) -> AreaCode | None:
     return None
 
 
-@lru_cache(maxsize=None)
-def _cached_area_codes(opinet_client: _OpinetAreaClient, sido: str | None = None) -> tuple[AreaCode, ...]:
-    return tuple(opinet_client.get_area_codes(sido))
+_area_cache: dict[tuple[_OpinetAreaClient, str | None], tuple[AreaCode, ...]] = {}
+_area_locks: WeakValueDictionary[tuple[_OpinetAreaClient, str | None], asyncio.Lock] = WeakValueDictionary()
+
+
+async def _cached_area_codes(opinet_client: _OpinetAreaClient, sido: str | None = None) -> tuple[AreaCode, ...]:
+    """완료된 값만 저장하고 동시 요청은 같은 조회 결과를 공유한다."""
+    key = (opinet_client, sido)
+    if key in _area_cache:
+        return _area_cache[key]
+    lock = _area_locks.setdefault(key, asyncio.Lock())
+    async with lock:
+        if key not in _area_cache:
+            _area_cache[key] = tuple(await opinet_client.get_area_codes(sido))
+        return _area_cache[key]
 
 
 def _vworld_queries(sido_code: str, opinet_sido_name: str, sigungu_name: str) -> list[str]:
@@ -189,7 +201,7 @@ def _region_parts_from_vworld_item(
     return code, code[:2], sido_name, sigungu_name
 
 
-def resolve_sigungu_bjd_code(
+async def resolve_sigungu_bjd_code(
     sigungu_code: str,
     *,
     opinet_client: _OpinetAreaClient,
@@ -206,11 +218,11 @@ def resolve_sigungu_bjd_code(
     normalized_code = _validate_sigungu_code(sigungu_code)
     sido_code = normalized_code[:2]
 
-    sido = _find_area(_cached_area_codes(opinet_client), sido_code)
+    sido = _find_area((await _cached_area_codes(opinet_client)), sido_code)
     if sido is None:
         raise OpinetNoDataError(f"Opinet sido code {sido_code!r} was not found")
 
-    sigungu = _find_area(_cached_area_codes(opinet_client, sido_code), normalized_code)
+    sigungu = _find_area((await _cached_area_codes(opinet_client, sido_code)), normalized_code)
     if sigungu is None:
         raise OpinetNoDataError(f"Opinet sigungu code {normalized_code!r} was not found")
 
@@ -220,7 +232,7 @@ def resolve_sigungu_bjd_code(
 
     for query in queries:
         try:
-            payload = vworld_client.search_district(query, category="L2", size=10)
+            payload = (await vworld_client.search_district(query, category="L2", size=10))
         except Exception as exc:
             if _is_vworld_no_data(exc):
                 continue

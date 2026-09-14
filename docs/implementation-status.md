@@ -23,7 +23,7 @@ REST API 디버그 UI 설계안에 맞춰 라이브러리 본체에 Streamlit �
 | 영역 | 구현 |
 |---|---|
 | API 카탈로그 | `src/opinet/catalog.py`의 `get_api_catalog()`, `get_api_catalog_item()`, `get_api_catalog_options()` |
-| Async/httpx | `OpinetConfig`, `SyncHttpxTransport`, `AsyncHttpxTransport`, `AsyncOpinetClient`, `OpinetClient.aio()` |
+| Async/httpx | `OpinetConfig`, `AsyncHttpxTransport`, `OpinetClient`, `AsyncTokenBucket` |
 | 데이터셋 표시 | `ApiCatalogItem.dataset_name`으로 사람이 읽기 쉬운 데이터셋명 제공 |
 | 서비스키 링크 | 모든 `ApiCatalogItem.service_key_url`이 오피넷 인증키 발급 페이지를 가리킴 |
 | 서비스키 정규화 | `OpinetClient`가 명시 인자/환경변수/`.env`에서 키를 읽고 공백 문자를 제거 |
@@ -39,7 +39,7 @@ REST API 디버그 UI 설계안에 맞춰 라이브러리 본체에 Streamlit �
 - 인증 파라미터는 `certkey`, 출력 포맷은 `out=json`입니다.
 - 서비스키는 `OpinetClient(api_key=...)`, `OPINET_API_KEY`, 현재 작업 디렉터리 또는 부모 디렉터리의 `.env` 순서로 읽습니다. 복사/붙여넣기 중 섞인 공백 문자는 값이 아니므로 제거합니다.
 - HTTP status/body error mapping lives in the httpx-based `src/opinet/_http.py`.
-- Public transport/API shape follows `python-krheritage-api`: config + sync/async httpx transports + `Client.aio()`.
+- 공개 HTTP/API는 config + native async OpinetClient/AsyncHttpxTransport + 공통 AsyncTokenBucket으로 구성한다.
 - The normalized station detail contract consumed by `python-krtour-map` is kept stable around `provider_station_id`, `provider_station_name`, `lon`/`lat`, `katec_x`/`katec_y`, `prices`, and `raw`.
 - 엔드포인트 파라미터 오류는 HTTP 호출 전에 `OpinetInvalidParameterError`로 실패시킵니다.
 - API 응답은 모델 생성 전에 `date`, `time`, `float`, `bool`, `StrEnum`으로 변환합니다.
@@ -62,7 +62,7 @@ REST API 디버그 UI 설계안에 맞춰 라이브러리 본체에 Streamlit �
 | Code mappings | `tests/test_codes.py`, `tests/test_vworld_sigungu.py` | Opinet ↔ BJD 시도 매핑, 알뜰 상표 판정, VWorld 시군구 매핑 |
 | Coordinates | `tests/test_client_endpoints.py` | WGS84↔KATEC 변환과 오피넷 요청/응답 경계 |
 | HTTP errors | `tests/test_http.py` | 인증/쿼터/5xx/네트워크/JSON 오류 |
-| Async client | `tests/test_async_client.py` | `AsyncOpinetClient`, `OpinetClient.aio()`, async context manager |
+| Async client | `tests/test_async_client.py` | `OpinetClient`, async context manager, TPS, 세션 소유권 |
 | Endpoints | `tests/test_client_endpoints.py` | 공식 5개 API의 타입, 파라미터, 빈 결과, 단일 dict 응답 |
 | API catalog/debug | `tests/test_catalog.py`, `tests/test_debug.py`, `tests/test_generated_fixtures.py` | 카탈로그 export, DebugRun trace, 민감정보 마스킹, fixture replay |
 | Experimental boundary | `tests/test_experimental.py` | 미검증 API가 명시적으로 unimplemented임을 고정 |
@@ -184,27 +184,33 @@ pytest -m live --run-live
 ### 사용 예시
 
 ```python
+import asyncio
 from opinet import OpinetClient, ProductCode
 
-client = OpinetClient()
-station = client.search_stations_around(
-    lon=127.0276,
-    lat=37.4979,
-    prodcd=ProductCode.DIESEL,
-)[0]
 
-record = {
-    "provider_station_id": station.provider_station_id,
-    "provider_product_code": station.provider_product_code,
-    "fuel_type": station.fuel_type.value,
-    "brand_code": station.brand_code,
-    "price": station.price,
-    "trade_date": station.trade_date,
-    "trade_time": station.trade_time,
-    "lon": station.coordinates.wgs84.lon,
-    "lat": station.coordinates.wgs84.lat,
-    "raw_price": station.raw.get("PRICE"),
-}
+async def main() -> None:
+    async with OpinetClient() as client:
+        station = (await client.search_stations_around(
+            lon=127.0276,
+            lat=37.4979,
+            prodcd=ProductCode.DIESEL,
+        ))[0]
+
+        record = {
+            "provider_station_id": station.provider_station_id,
+            "provider_product_code": station.provider_product_code,
+            "fuel_type": station.fuel_type.value,
+            "brand_code": station.brand_code,
+            "price": station.price,
+            "trade_date": station.trade_date,
+            "trade_time": station.trade_time,
+            "lon": station.coordinates.wgs84.lon,
+            "lat": station.coordinates.wgs84.lat,
+            "raw_price": station.raw.get("PRICE"),
+        }
+
+
+asyncio.run(main())
 ```
 
 이 예시는 python-opinet-api의 normalized 모델만 사용합니다. 저장 schema, cache 전략, raw 보관 여부는 호출 애플리케이션의 책임입니다.
@@ -271,3 +277,31 @@ raw = to_json_safe_raw(station.raw)
 - `tests/test_pep561_packaging.py`에서 wheel/sdist를 빌드하고, 각 산출물을 임시 venv에 설치한 뒤 `import opinet`, `import opinet.normalized`, downstream mypy reveal smoke를 실행합니다.
 
 이 테스트는 Pydantic DTO와 기존 public export가 설치 환경에서도 typed package로 보이는지 확인합니다.
+
+
+## 비동기 호출과 요청 속도
+
+`OpinetClient`의 조회와 디버그는 `await`, `iter_stations_in_bbox`는 `async for`,
+종료는 `async with` 또는 `await client.aclose()`를 사용한다. Async 접두사 클라이언트,
+aio 팩터리와 동기 transport는 제거했다. 코드표·좌표·모델 변환·fixture 저장 같은
+로컬 유틸리티는 일반 함수다. 기존 엔드포인트 인자와 반환 모델은 유지한다.
+
+기본 `max_rps=5.0`이다. `AsyncTokenBucket(max_rps, capacity=...)`를
+`rate_limiter=`에 주입하면 여러 클라이언트가 같은 요청 예산을 쓴다. 주입된 버킷이
+max_rps보다 우선한다. 기본 capacity는 max(1, max_rps)이며 초기에는 가득 차
+있으므로 burst를 허용한다. 일정한 간격은 capacity=1로 설정한다.
+각 요청·재시도·리다이렉트·디버그·격자 셀에 같은 버킷을 적용한다.
+인자 검증 실패와 캐시 적중은 요청을 보내지 않는다. TPS는 일일 쿼터를 대신하지 않는다.
+
+버킷은 한 이벤트 루프에서 사용한다. 대기 취소는 토큰을 소비하지 않고 다음 대기자를
+진행시킨다. 401/403/429는 즉시 실패하며 네트워크 오류와 5xx만 기존 backoff로
+재시도한다. 사용자 정의 인증/transport 내부에서 발생하는 추가 전송은 계측 범위 밖이다.
+
+내부 HTTP 세션은 첫 요청 시 생성하고 종료 시 닫는다. session에 주입하는 비동기
+세션은 호출자가 닫는다. 종료한 클라이언트의 추가 요청은 실패한다.
+디버그 기록은 ContextVar로 호출별 격리하고 성공·실패·취소 모두에서 복원한다.
+응답 파싱은 원문으로 완료한 후 진단 결과의 알려진 키와 인코딩된 키를 마스킹한다.
+VWorld 연동은 비동기 search_district를 사용하며 완료된 지역 코드만 캐시한다.
+
+
+예제는 [docs/async-tps.md](../docs/async-tps.md)를 참고한다.

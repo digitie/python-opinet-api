@@ -11,7 +11,7 @@
 
 | 표면 | 진입점 | 설명 |
 |---|---|---|
-| 공식 클라이언트 (5개 엔드포인트) | `opinet.OpinetClient` / `opinet.AsyncOpinetClient` | 평균가·최저가·반경검색·상세조회·지역코드 5종을 동기/비동기로 호출 |
+| 공식 클라이언트 (5개 엔드포인트) | `opinet.OpinetClient` | 평균가·최저가·반경검색·상세조회·지역코드 5종을 비동기로 호출 |
 | 실험 클라이언트 (미검증 17종) | `opinet.experimental.OpinetExperimentalClient` | PDF 가이드북의 추가 API, 호출 동작 미보장 |
 | 좌표 변환 | `opinet.coords.katec_to_wgs84()` / `wgs84_to_katec()` | KATEC ↔ WGS84 좌표 변환 |
 | 시도코드 매핑 | `opinet.codes.opinet_sido_to_bjd()` / `bjd_sido_to_opinet()` | 오피넷 시도코드 ↔ 행정안전부 법정동코드 |
@@ -89,57 +89,64 @@ pytest -m live --run-live
 ### 3단계: 사용
 
 ```python
+import asyncio
 from datetime import date, time
 from opinet import OpinetClient, ProductCode, SortOrder
 from opinet.codes import StationType, BrandCode
 
-client = OpinetClient()  # 환경변수에서 키 자동 로드
 
-# 1) 전국 평균가 — 모든 필드는 Python 타입
-for row in client.get_national_average_price():
-    assert isinstance(row.trade_date, date)   # YYYYMMDD → date
-    assert isinstance(row.price, float)       # "1919.44" → 1919.44
-    assert isinstance(row.diff, float)        # "+0.39" → 0.39
-    assert isinstance(row.product_code, ProductCode)  # "B027" → enum
-    print(f"{row.product_name}: {row.price:,.2f}원 ({row.diff:+.2f}) — {row.trade_date}")
+async def main() -> None:
+    async with OpinetClient() as client:
 
-# 2) 강남역 반경 3km 내 가장 싼 휘발유 5곳
-stations = client.search_stations_around(
-    lon=127.0276,
-    lat=37.4979,  # 강남역 위경도
-    radius_m=3000,
-    prodcd=ProductCode.GASOLINE,
-    sort=SortOrder.PRICE,
-)
-for s in stations[:5]:
-    print(f"{s.name}: {s.price:,.0f}원, {s.distance_m:.0f}m, "
-          f"({s.lon:.4f}, {s.lat:.4f})")
+        # 1) 전국 평균가 — 모든 필드는 Python 타입
+        for row in (await client.get_national_average_price()):
+            assert isinstance(row.trade_date, date)   # YYYYMMDD → date
+            assert isinstance(row.price, float)       # "1919.44" → 1919.44
+            assert isinstance(row.diff, float)        # "+0.39" → 0.39
+            assert isinstance(row.product_code, ProductCode)  # "B027" → enum
+            print(f"{row.product_name}: {row.price:,.2f}원 ({row.diff:+.2f}) — {row.trade_date}")
 
-# 3) 주유소 ID로 상세 조회
-detail = client.get_station_detail("A0010207")
-assert isinstance(detail.station_type, StationType)
-assert isinstance(detail.has_carwash, bool)
-print(f"{detail.name} ({detail.brand.name})")
-print(f"  주소: {detail.address_road}")
-print(f"  업종: {detail.station_type.name}")  # GAS_STATION / LPG_STATION / BOTH
-print(f"  편의시설: 정비={detail.has_maintenance}, 세차={detail.has_carwash}")
-for p in detail.prices:
-    # trade_date는 date, trade_time은 time
-    print(f"  {p.product_code.name}: {p.price:,.0f}원 "
-          f"({p.trade_date.isoformat()} {p.trade_time.isoformat()})")
+        # 2) 강남역 반경 3km 내 가장 싼 휘발유 5곳
+        stations = (await client.search_stations_around(
+            lon=127.0276,
+            lat=37.4979,  # 강남역 위경도
+            radius_m=3000,
+            prodcd=ProductCode.GASOLINE,
+            sort=SortOrder.PRICE,
+        ))
+        for s in stations[:5]:
+            print(f"{s.name}: {s.price:,.0f}원, {s.distance_m:.0f}m, "
+                  f"({s.lon:.4f}, {s.lat:.4f})")
 
-# 4) 전국 휘발유 최저가 Top 10
-for s in client.get_lowest_price_top20(ProductCode.GASOLINE, cnt=10):
-    print(f"{s.price:,.0f}원 — {s.name}")
+        # 3) 주유소 ID로 상세 조회
+        detail = (await client.get_station_detail("A0010207"))
+        assert isinstance(detail.station_type, StationType)
+        assert isinstance(detail.has_carwash, bool)
+        print(f"{detail.name} ({detail.brand.name})")
+        print(f"  주소: {detail.address_road}")
+        print(f"  업종: {detail.station_type.name}")  # GAS_STATION / LPG_STATION / BOTH
+        print(f"  편의시설: 정비={detail.has_maintenance}, 세차={detail.has_carwash}")
+        for p in detail.prices:
+            # trade_date는 date, trade_time은 time
+            price_text = f"{p.price:,.0f}원" if p.price is not None else "가격 정보 없음"
+            print(f"  {p.product_code.name}: {price_text} "
+                  f"({p.trade_date.isoformat()} {p.trade_time.isoformat()})")
 
-# 5) 시도 코드 목록 — code는 str (선행 0 보존)
-for area in client.get_area_codes():
-    print(f"{area.code}: {area.name}")  # "01: 서울"
+        # 4) 전국 휘발유 최저가 Top 10
+        for s in (await client.get_lowest_price_top20(ProductCode.GASOLINE, cnt=10)):
+            print(f"{s.price:,.0f}원 — {s.name}")
+
+        # 5) 시도 코드 목록 — code는 str (선행 0 보존)
+        for area in (await client.get_area_codes()):
+            print(f"{area.code}: {area.name}")  # "01: 서울"
+
+
+asyncio.run(main())
 ```
 
 ### Async / httpx client
 
-`OpinetClient`는 `httpx.Client` 기반의 동기 facade이고, `OpinetClient.aio()`는 `python-krheritage-api`와 같은 형태로 `AsyncOpinetClient`를 반환합니다. 두 클라이언트는 동일한 모델과 `python-krtour-map` 호환 normalized 계약을 유지합니다.
+`OpinetClient`는 `httpx.AsyncClient`를 직접 사용하는 비동기 전용 클라이언트입니다. 기존 모델과 `python-krtour-map` 호환 normalized 계약은 유지합니다. 모든 조회에 `await`, 격자 순회에 `async for`, 세션 관리에 `async with`를 사용합니다.
 
 ```python
 import asyncio
@@ -147,7 +154,7 @@ from opinet import OpinetClient, ProductCode
 
 
 async def main() -> None:
-    async with OpinetClient.aio() as client:
+    async with OpinetClient() as client:
         rows = await client.get_lowest_price_top20(ProductCode.GASOLINE, cnt=5, area="01")
         for row in rows:
             print(row.provider_station_id, row.name, row.price)
@@ -202,16 +209,25 @@ asyncio.run(main())
 호출하고 `uni_id` 기준 중복 제거해 **근사 enumeration**을 제공합니다.
 
 ```python
-# 시군구 등 bounded 영역 권장 (좌표는 WGS84)
-for station in client.iter_stations_in_bbox(
-    min_lon=127.00, min_lat=37.46, max_lon=127.14, max_lat=37.55, radius_m=5000
-):
-    print(station.uni_id, station.name, station.lon, station.lat)
+from opinet import OpinetClient
+import asyncio
+
+
+async def main() -> None:
+    # 시군구 등 bounded 영역 권장 (좌표는 WGS84)
+    async with OpinetClient() as client:
+        async for station in client.iter_stations_in_bbox(
+            min_lon=127.00, min_lat=37.46, max_lon=127.14, max_lat=37.55, radius_m=5000
+        ):
+            print(station.uni_id, station.name, station.lon, station.lat)
+
+
+asyncio.run(main())
 ```
 
 | 메서드 | 기반 | 반환 |
 |---|---|---|
-| `iter_stations_in_bbox()` / `AsyncOpinetClient.iter_stations_in_bbox()` | `aroundAll.do` 격자 + dedup | `Iterator[Station]` / `AsyncIterator[Station]` |
+| `iter_stations_in_bbox()` | `aroundAll.do` 격자 + dedup | `AsyncIterator[Station]` |
 
 **주의:**
 - **호출 수가 면적에 비례해 급증합니다.** 전국(약 1000km×550km)을 `radius_m=5000`으로 덮으면
@@ -225,19 +241,25 @@ for station in client.iter_stations_in_bbox(
 디버그 UI나 외부 도구가 API 목록을 하드코딩하지 않도록 공식 5개 API 카탈로그를 제공합니다. 각 항목에는 함수명, 엔드포인트, 데이터셋 식별자, 사람이 읽기 쉬운 데이터셋명, 파라미터 설명, 서비스키 발급 링크가 들어 있습니다.
 
 ```python
+import asyncio
 from opinet import OpinetClient, get_api_catalog_options, get_api_catalog_item
 
-options = get_api_catalog_options()
-# "반경 내 주유소 가격 (aroundAll.do)"처럼 UI에 바로 표시 가능
 
-item = get_api_catalog_item("search_stations_around")
-print(item.dataset_name)      # 반경 내 주유소 가격
-print(item.service_key_url)   # https://www.opinet.co.kr/user/custapi/openApiNew.do
+async def main() -> None:
+    options = get_api_catalog_options()
+    # "반경 내 주유소 가격 (aroundAll.do)"처럼 UI에 바로 표시 가능
 
-client = OpinetClient()       # .env 또는 환경변수의 OPINET_API_KEY 자동 로드
-run = client.debug().get_area_codes()
-print(run.dataset_name)       # 오피넷 시도/시군구 코드
-print(run.trace_payload)      # Debug Trace 탭 표시용 payload
+    item = get_api_catalog_item("search_stations_around")
+    print(item.dataset_name)      # 반경 내 주유소 가격
+    print(item.service_key_url)   # https://www.opinet.co.kr/user/custapi/openApiNew.do
+
+    async with OpinetClient() as client:
+        run = (await client.debug().get_area_codes())
+        print(run.dataset_name)       # 오피넷 시도/시군구 코드
+        print(run.trace_payload)      # Debug Trace 탭 표시용 payload
+
+
+asyncio.run(main())
 ```
 
 Streamlit 예제는 `examples/streamlit_debug_ui.py`에 있습니다. 라이브러리 본체는 Streamlit에 의존하지 않으며, 예제 앱은 API 선택 시 카탈로그 항목과 서비스키 발급 링크를 함께 표시합니다.
@@ -289,18 +311,27 @@ is_alddle(BrandCode.SKE)  # False
 본 라이브러리는 WGS84 `lon`/`lat` 또는 KATEC `katec_x`/`katec_y` 원시 좌표 쌍을 받습니다. WGS84 입력은 내부에서 KATEC으로 변환해 `aroundAll.do`에 전달합니다.
 
 ```python
-stations = client.search_stations_around(
-    lon=127.0276,
-    lat=37.4979,
-    ...
-)
+from opinet import OpinetClient
+import asyncio
 
-# 응답 모델: WGS84와 KATEC 원본 float를 함께 제공
-station = stations[0]
-station.lon, station.lat          # WGS84 float
-station.katec_x, station.katec_y  # KATEC float
-station.lon_lat                   # (lon, lat)
-station.katec_xy                  # (x, y)
+
+async def main() -> None:
+    async with OpinetClient() as client:
+        stations = (await client.search_stations_around(
+            lon=127.0276,
+            lat=37.4979,
+            radius_m=1000,
+        ))
+
+        # 응답 모델: WGS84와 KATEC 원본 float를 함께 제공
+        station = stations[0]
+        station.lon, station.lat          # WGS84 float
+        station.katec_x, station.katec_y  # KATEC float
+        station.lon_lat                   # (lon, lat)
+        station.katec_xy                  # (x, y)
+
+
+asyncio.run(main())
 ```
 
 직접 변환이 필요하면 `opinet.coords`를 사용합니다:
@@ -376,6 +407,8 @@ bjd_sido_to_opinet("52")  # → "06" (전북특별자치도 신코드 → 오피
 ## 에러 처리
 
 ```python
+from opinet import OpinetClient
+import asyncio
 from opinet.exceptions import (
     OpinetError,                  # 공통 베이스
     OpinetAuthError,              # 인증 실패 (Invalid Key, 401, 403)
@@ -386,21 +419,27 @@ from opinet.exceptions import (
     OpinetNetworkError,           # 네트워크 레벨 오류
 )
 
-try:
-    stations = client.search_stations_around(
-        lon=127.0,
-        lat=37.5,
-        radius_m=10000,
-    )
-except OpinetInvalidParameterError as e:
-    # radius_m > 5000 → 호출 전에 검증 실패
-    print(f"파라미터 오류: {e}")
-except OpinetAuthError:
-    print("인증키를 확인하세요")
-except OpinetRateLimitError:
-    print("일일 호출 한도(1,500회)를 초과했습니다")
-except (OpinetServerError, OpinetNetworkError) as e:
-    print(f"일시적 오류, 재시도 권장: {e}")
+
+async def main() -> None:
+    async with OpinetClient() as client:
+        try:
+            stations = (await client.search_stations_around(
+                lon=127.0,
+                lat=37.5,
+                radius_m=10000,
+            ))
+        except OpinetInvalidParameterError as e:
+            # radius_m > 5000 → 호출 전에 검증 실패
+            print(f"파라미터 오류: {e}")
+        except OpinetAuthError:
+            print("인증키를 확인하세요")
+        except OpinetRateLimitError:
+            print("일일 호출 한도(1,500회)를 초과했습니다")
+        except (OpinetServerError, OpinetNetworkError) as e:
+            print(f"일시적 오류, 재시도 권장: {e}")
+
+
+asyncio.run(main())
 ```
 
 5xx와 네트워크 오류는 라이브러리 내부에서 exponential backoff로 자동 재시도합니다 (기본 2회). 401/403/429는 즉시 실패시킵니다.
@@ -470,7 +509,7 @@ detail.is_kpetro          # KPETRO_YN을 매핑한 별도 boolean (품질인증 
 - `POLL_DIV_CO`를 우선하고, 없을 때만 문서 표기의 `POLL_DIV_CD`를 fallback으로 봅니다.
 - `GPOLL_DIV_CO=" "` 같은 공백은 `None`으로 정규화합니다.
 - 좌표 범위 테스트는 주소 권역 확인용입니다. 실제 변환값의 소수점 하한을 임의로 좁히지 않습니다.
-- HTTP transport는 `httpx`를 사용하며, sync client와 async client가 같은 파서/모델 계약을 공유합니다.
+- HTTP transport는 `httpx.AsyncClient`를 사용하며 기존 파서/모델 계약을 유지합니다.
 
 ---
 
@@ -623,7 +662,7 @@ python -m mypy src/opinet
 
 ## 호출 한도
 
-PDF 가이드북 기준 **1,500 calls / 일**. 라이브러리는 옵션으로 사용량 카운터(`OpinetClient(track_usage=True)`)를 제공하여 잔여 호출 추정을 도울 수 있습니다.
+PDF 가이드북 기준 **1,500 calls / 일**입니다. TPS 제어는 일일 호출 수를 집계하지 않으므로 일일 쿼터는 호출자가 관리합니다.
 
 응답 받은 데이터는 다음과 같은 시점까지 캐싱하면 호출 절감에 좋습니다:
 
@@ -707,20 +746,26 @@ fuel_type_to_product_code(FuelType.DIESEL)  # ProductCode.DIESEL
 `lowTop10.do`와 `aroundAll.do`의 Station 응답은 OpiNet row에 `PRODCD`가 없는 경우가 많습니다. 이때 python-opinet-api는 요청에 사용한 `prodcd`를 `Station.product_code`에 채웁니다. 응답 row에 `PRODCD`가 실제로 있으면 응답 값을 우선합니다.
 
 ```python
+import asyncio
 from opinet import OpinetClient, ProductCode
 
-client = OpinetClient()
 
-stations = client.get_lowest_price_top20(ProductCode.GASOLINE, cnt=10)
-station = stations[0]
+async def main() -> None:
+    async with OpinetClient() as client:
 
-station.product_code           # ProductCode.GASOLINE, 요청 context에서 보존
-station.product_name           # 응답 PRODNM이 없으면 None
-station.provider_product_code  # "B027"
-station.provider_product_name  # 응답 PRODNM 또는 None
-station.fuel_type              # FuelType.GASOLINE
-station.provider_station_id    # OpiNet UNI_ID
-station.brand_code             # OpiNet POLL_DIV_CO/POLL_DIV_CD 원문 code
+        stations = (await client.get_lowest_price_top20(ProductCode.GASOLINE, cnt=10))
+        station = stations[0]
+
+        station.product_code           # ProductCode.GASOLINE, 요청 context에서 보존
+        station.product_name           # 응답 PRODNM이 없으면 None
+        station.provider_product_code  # "B027"
+        station.provider_product_name  # 응답 PRODNM 또는 None
+        station.fuel_type              # FuelType.GASOLINE
+        station.provider_station_id    # OpiNet UNI_ID
+        station.brand_code             # OpiNet POLL_DIV_CO/POLL_DIV_CD 원문 code
+
+
+asyncio.run(main())
 ```
 
 최저가/주변검색 응답 row에 `TRADE_DT` 또는 `TRADE_TM`이 실제로 포함되면 `Station.trade_date`와 `Station.trade_time`에 각각 `datetime.date`, `datetime.time`으로 노출됩니다. 필드가 없으면 `None`입니다.
@@ -741,11 +786,20 @@ station.katec_xy                  # (x, y)
 `AreaCode`는 OpiNet code level과 BJD 시도 prefix를 명시적으로 제공합니다. 시도는 2자리, 시군구는 4자리입니다. 시군구 4자리 OpiNet code 자체는 법정동코드와 일치하지 않으므로 python-opinet-api는 산술 변환을 추정하지 않습니다.
 
 ```python
-area = client.get_area_codes("01")[0]
+from opinet import OpinetClient
+import asyncio
 
-area.code_level        # "sigungu"
-area.parent_sido_code  # "01"
-area.bjd_sido_prefix   # "11"
+
+async def main() -> None:
+    async with OpinetClient() as client:
+        area = (await client.get_area_codes("01"))[0]
+
+        area.code_level        # "sigungu"
+        area.parent_sido_code  # "01"
+        area.bjd_sido_prefix   # "11"
+
+
+asyncio.run(main())
 ```
 
 잘못된 길이의 code나 미확인 OpiNet 시도 code는 `OpinetInvalidParameterError`로 실패합니다.
@@ -753,37 +807,54 @@ area.bjd_sido_prefix   # "11"
 VWorld 행정구역 검색을 함께 쓰면 오피넷 시군구 코드를 5자리 법정동 시군구 코드로 명시 매핑할 수 있습니다.
 
 ```python
+from opinet import OpinetClient
+import asyncio
 from vworld import VworldClient
 from opinet.vworld import resolve_sigungu_bjd_code
 
-vworld = VworldClient.from_env(domain="")
-mapping = resolve_sigungu_bjd_code(
-    "0113",
-    opinet_client=client,
-    vworld_client=vworld,
-)
 
-mapping.opinet_sigungu_name  # "강남구"
-mapping.bjd_sigungu_code     # "11680"
-mapping.bjd_sido_code        # "11"
-mapping.bjd_sido_name        # "서울특별시"
-mapping.bjd_sigungu_name     # "강남구"
-mapping.vworld_title         # "서울특별시 강남구"
+async def main() -> None:
+    async with OpinetClient() as client:
+        async with VworldClient.from_env(domain="") as vworld:
+            mapping = (await resolve_sigungu_bjd_code(
+                "0113",
+                opinet_client=client,
+                vworld_client=vworld,
+            ))
+
+            mapping.opinet_sigungu_name  # "강남구"
+            mapping.bjd_sigungu_code     # "11680"
+            mapping.bjd_sido_code        # "11"
+            mapping.bjd_sido_name        # "서울특별시"
+            mapping.bjd_sigungu_name     # "강남구"
+            mapping.vworld_title         # "서울특별시 강남구"
+
+
+asyncio.run(main())
 ```
 
-동일한 동작은 `client.resolve_sigungu_bjd_code("0113", vworld_client=vworld)`로도 호출할 수 있습니다.
+동일한 동작은 `await client.resolve_sigungu_bjd_code("0113", vworld_client=vworld)`로도 호출할 수 있습니다.
 
 ### raw payload 보존
 
 `AvgPrice`, `Station`, `StationDetail`, `OilPrice`, `AreaCode`는 마지막 dataclass 필드로 `raw`를 가집니다. `raw`에는 타입 변환 전 원본 row payload가 보존됩니다. 숫자, 날짜, 시간도 OpiNet 응답처럼 문자열입니다.
 
 ```python
-avg = client.get_national_average_price()[0]
+from opinet import OpinetClient
+import asyncio
 
-avg.price            # 1919.44, float
-avg.trade_date       # datetime.date(2025, 7, 23)
-avg.raw["PRICE"]     # "1919.44", provider 원문 문자열
-avg.raw["TRADE_DT"]  # "20250723"
+
+async def main() -> None:
+    async with OpinetClient() as client:
+        avg = (await client.get_national_average_price())[0]
+
+        avg.price            # 1919.44, float
+        avg.trade_date       # datetime.date(2025, 7, 23)
+        avg.raw["PRICE"]     # "1919.44", provider 원문 문자열
+        avg.raw["TRADE_DT"]  # "20250723"
+
+
+asyncio.run(main())
 ```
 
 `raw`는 읽기 전용 mapping입니다. `StationDetail.raw["OIL_PRICE"]`처럼 nested `OIL_PRICE`가 있으면 가능한 한 원형 row를 보존하되, 내부 mapping도 읽기 전용으로 제공합니다. `certkey`, `api_key`, `authorization` 같은 인증 관련 key는 raw에 남기지 않습니다.
@@ -819,6 +890,7 @@ def to_station_record(station):
 `opinet.normalized` 모듈은 앱 저장 계층에 바로 넘기기 쉬운 Pydantic DTO record를 제공합니다. 기존 `AvgPrice`, `Station`, `AreaCode` 모델은 그대로 유지되고, 필요할 때 `to_normalized()`로 변환합니다. DTO는 Pydantic v2 `BaseModel` 기반이며 `frozen=True`, `extra="forbid"` 설정으로 불변 record처럼 동작합니다.
 
 ```python
+import asyncio
 from opinet import OpinetClient, ProductCode
 from opinet.normalized import (
     NormalizedFuelAverage,
@@ -829,50 +901,55 @@ from opinet.normalized import (
     to_json_safe_raw,
 )
 
-client = OpinetClient()
 
-avg = client.get_national_average_price()[0]
-avg_record = avg.to_normalized(endpoint="avgAllPrice.do")
-assert isinstance(avg_record, NormalizedFuelAverage)
-assert avg_record.provider == "opinet"
-assert avg_record.provider_product_code == "B034"
-assert avg_record.fuel_type.value == "premium_gasoline"
-assert avg_record.price_datetime().tzinfo is not None  # Asia/Seoul midnight by default
-assert avg_record.price_timestamp() == avg.price_timestamp()
+async def main() -> None:
+    async with OpinetClient() as client:
 
-station = client.get_lowest_price_top20(ProductCode.GASOLINE)[0]
-station_record = station.to_normalized(endpoint="lowTop10.do")
-assert isinstance(station_record, NormalizedFuelStation)
-assert station_record.provider_station_id == station.provider_station_id
-assert station_record.provider_product_code == "B027"  # request context is preserved
-assert station_record.provider_product_name is None    # PRODNM is absent in many station rows
-assert station_record.trade_datetime() is None         # unless TRADE_DT and TRADE_TM both exist
+        avg = (await client.get_national_average_price())[0]
+        avg_record = avg.to_normalized(endpoint="avgAllPrice.do")
+        assert isinstance(avg_record, NormalizedFuelAverage)
+        assert avg_record.provider == "opinet"
+        assert avg_record.provider_product_code == "B034"
+        assert avg_record.fuel_type.value == "premium_gasoline"
+        assert avg_record.price_datetime().tzinfo is not None  # Asia/Seoul midnight by default
+        assert avg_record.price_timestamp() == avg.price_timestamp()
 
-detail = client.get_station_detail("A0010207")
-detail_record = detail.to_normalized(endpoint="detailById.do")
-assert isinstance(detail_record, NormalizedFuelStationDetail)
-assert detail_record.provider_station_id == detail.provider_station_id
-assert detail_record.brand_code == "SKE"
-assert detail_record.sub_brand_code is None
-assert detail_record.station_type.value == "N"         # LPG_YN 업종구분
-assert detail_record.sigun_code == "0113"
-assert detail_record.has_carwash is True
-assert detail_record.is_kpetro is False                # 품질인증 여부
-assert isinstance(detail_record.prices[0], NormalizedFuelStationDetailPrice)
-assert detail_record.prices[0].provider_station_id == "A0010207"
-assert detail_record.prices[0].provider_product_code == "B027"
-assert detail_record.prices[0].fuel_type.value == "gasoline"
+        station = (await client.get_lowest_price_top20(ProductCode.GASOLINE))[0]
+        station_record = station.to_normalized(endpoint="lowTop10.do")
+        assert isinstance(station_record, NormalizedFuelStation)
+        assert station_record.provider_station_id == station.provider_station_id
+        assert station_record.provider_product_code == "B027"  # request context is preserved
+        assert station_record.provider_product_name is None    # PRODNM is absent in many station rows
+        assert station_record.trade_datetime() is None         # unless TRADE_DT and TRADE_TM both exist
 
-area = client.get_area_codes("01")[0]
-area_record = area.to_normalized()
-assert isinstance(area_record, NormalizedFuelRegionCode)
-assert area_record.code_level == "sigungu"
-assert area_record.parent_sido_code == "01"
-assert area_record.bjd_sido_prefix == "11"
+        detail = (await client.get_station_detail("A0010207"))
+        detail_record = detail.to_normalized(endpoint="detailById.do")
+        assert isinstance(detail_record, NormalizedFuelStationDetail)
+        assert detail_record.provider_station_id == detail.provider_station_id
+        assert detail_record.brand_code == "SKE"
+        assert detail_record.sub_brand_code is None
+        assert detail_record.station_type.value == "N"         # LPG_YN 업종구분
+        assert detail_record.sigun_code == "0113"
+        assert detail_record.has_carwash is True
+        assert detail_record.is_kpetro is False                # 품질인증 여부
+        assert isinstance(detail_record.prices[0], NormalizedFuelStationDetailPrice)
+        assert detail_record.prices[0].provider_station_id == "A0010207"
+        assert detail_record.prices[0].provider_product_code == "B027"
+        assert detail_record.prices[0].fuel_type.value == "gasoline"
 
-plain_raw = to_json_safe_raw(station.raw)  # plain dict/list, safe for json.dumps
+        area = (await client.get_area_codes("01"))[0]
+        area_record = area.to_normalized()
+        assert isinstance(area_record, NormalizedFuelRegionCode)
+        assert area_record.code_level == "sigungu"
+        assert area_record.parent_sido_code == "01"
+        assert area_record.bjd_sido_prefix == "11"
 
-payload = station_record.model_dump(mode="json")  # Pydantic JSON mode
+        plain_raw = to_json_safe_raw(station.raw)  # plain dict/list, safe for json.dumps
+
+        payload = station_record.model_dump(mode="json")  # Pydantic JSON mode
+
+
+asyncio.run(main())
 ```
 
 `NormalizedFuelAverage.price_datetime()`는 평균가처럼 날짜만 있는 record를 KST 자정의 timezone-aware `datetime`으로 반환합니다. `NormalizedFuelStation.trade_datetime()`는 `trade_date`와 `trade_time`이 모두 있을 때만 KST timezone-aware `datetime`을 반환하고, 둘 중 하나라도 없으면 `None`을 반환합니다.
@@ -886,3 +963,31 @@ payload = station_record.model_dump(mode="json")  # Pydantic JSON mode
 python-opinet-api는 PEP 561 typed package입니다. 소스에는 `src/opinet/py.typed` marker가 있고, 배포 산출물에는 import 패키지 경로인 `opinet/py.typed`로 포함됩니다. downstream 프로젝트의 mypy가 `opinet`과 `opinet.normalized` 타입 정보를 직접 읽을 수 있습니다.
 
 패키징 테스트는 wheel과 sdist를 각각 임시 venv에 설치한 뒤 `import opinet`, `import opinet.normalized`, downstream mypy smoke를 확인합니다.
+
+
+## 비동기 호출과 요청 속도
+
+`OpinetClient`의 조회와 디버그는 `await`, `iter_stations_in_bbox`는 `async for`,
+종료는 `async with` 또는 `await client.aclose()`를 사용한다. Async 접두사 클라이언트,
+aio 팩터리와 동기 transport는 제거했다. 코드표·좌표·모델 변환·fixture 저장 같은
+로컬 유틸리티는 일반 함수다. 기존 엔드포인트 인자와 반환 모델은 유지한다.
+
+기본 `max_rps=5.0`이다. `AsyncTokenBucket(max_rps, capacity=...)`를
+`rate_limiter=`에 주입하면 여러 클라이언트가 같은 요청 예산을 쓴다. 주입된 버킷이
+max_rps보다 우선한다. 기본 capacity는 max(1, max_rps)이며 초기에는 가득 차
+있으므로 burst를 허용한다. 일정한 간격은 capacity=1로 설정한다.
+각 요청·재시도·리다이렉트·디버그·격자 셀에 같은 버킷을 적용한다.
+인자 검증 실패와 캐시 적중은 요청을 보내지 않는다. TPS는 일일 쿼터를 대신하지 않는다.
+
+버킷은 한 이벤트 루프에서 사용한다. 대기 취소는 토큰을 소비하지 않고 다음 대기자를
+진행시킨다. 401/403/429는 즉시 실패하며 네트워크 오류와 5xx만 기존 backoff로
+재시도한다. 사용자 정의 인증/transport 내부에서 발생하는 추가 전송은 계측 범위 밖이다.
+
+내부 HTTP 세션은 첫 요청 시 생성하고 종료 시 닫는다. session에 주입하는 비동기
+세션은 호출자가 닫는다. 종료한 클라이언트의 추가 요청은 실패한다.
+디버그 기록은 ContextVar로 호출별 격리하고 성공·실패·취소 모두에서 복원한다.
+응답 파싱은 원문으로 완료한 후 진단 결과의 알려진 키와 인코딩된 키를 마스킹한다.
+VWorld 연동은 비동기 search_district를 사용하며 완료된 지역 코드만 캐시한다.
+
+
+예제는 [docs/async-tps.md](docs/async-tps.md)를 참고한다.

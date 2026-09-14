@@ -1,5 +1,9 @@
 # decisions.md — 의사결정 기록
 
+## 2026-09-14 — async-only와 공통 TPS
+
+사용자의 전체 라이브러리 async-only 요청에 따라 OpinetClient 하나로 통합했다. 기존 동기 클래스에 있던 파서와 정규화 모델을 유지하고 I/O를 native async로 바꿨다. 공통 AsyncTokenBucket을 주입해 TPS를 합산한다. 디버그는 공유 HTTP 객체 교체 대신 ContextVar를 사용하고 VWorld 지역 코드 캐시는 코루틴 대신 완료된 값만 저장한다.
+
 이 문서는 이 프로젝트의 구조적 결정을 결정 시점 순서로 누적한다.
 결정이 뒤집힐 때는 새 항목을 추가하고, 옛 항목은 지우지 않은 채
 (supersedes: 위 항목)으로 표시한다.

@@ -17,10 +17,10 @@ from opinet import (
     to_json_safe_raw,
 )
 
-def test_avg_price_to_normalized_record(client, load_fixture, mock_opinet):
+async def test_avg_price_to_normalized_record(client, load_fixture, mock_opinet):
     mock_opinet.add("avgAllPrice.do", json=load_fixture("avg_all_price.json"))
 
-    avg = client.get_national_average_price()[1]
+    avg = (await client.get_national_average_price())[1]
     normalized = avg.to_normalized(endpoint="avgAllPrice.do")
 
     assert isinstance(normalized, NormalizedFuelAverage)
@@ -53,10 +53,10 @@ def test_normalized_records_reject_extra_fields():
         )
 
 
-def test_avg_price_kst_datetime_and_timestamp(client, load_fixture, mock_opinet):
+async def test_avg_price_kst_datetime_and_timestamp(client, load_fixture, mock_opinet):
     mock_opinet.add("avgAllPrice.do", json=load_fixture("avg_all_price.json"))
 
-    avg = client.get_national_average_price()[0]
+    avg = (await client.get_national_average_price())[0]
     normalized = avg.to_normalized()
     expected = datetime(2025, 7, 23, 0, 0, tzinfo=ZoneInfo("Asia/Seoul"))
 
@@ -66,10 +66,10 @@ def test_avg_price_kst_datetime_and_timestamp(client, load_fixture, mock_opinet)
     assert avg.price_timestamp() == pytest.approx(expected.timestamp())
 
 
-def test_station_to_normalized_record_without_provider_product_name(client, load_fixture, mock_opinet):
+async def test_station_to_normalized_record_without_provider_product_name(client, load_fixture, mock_opinet):
     mock_opinet.add("lowTop10.do", json=load_fixture("low_top10_B027.json"))
 
-    station = client.get_lowest_price_top20(ProductCode.GASOLINE, cnt=2, area="01")[0]
+    station = (await client.get_lowest_price_top20(ProductCode.GASOLINE, cnt=2, area="01"))[0]
     normalized = station.to_normalized(endpoint="lowTop10.do")
 
     assert isinstance(normalized, NormalizedFuelStation)
@@ -95,10 +95,10 @@ def test_station_to_normalized_record_without_provider_product_name(client, load
     assert normalized.raw["PRICE"] == "1538"
 
 
-def test_station_trade_datetime_when_trade_fields_exist(client, load_fixture, mock_opinet):
+async def test_station_trade_datetime_when_trade_fields_exist(client, load_fixture, mock_opinet):
     mock_opinet.add("lowTop10.do", json=load_fixture("low_top10_with_trade_context.json"))
 
-    station = client.get_lowest_price_top20(ProductCode.GASOLINE, cnt=1)[0]
+    station = (await client.get_lowest_price_top20(ProductCode.GASOLINE, cnt=1))[0]
     normalized = station.to_normalized(endpoint="lowTop10.do")
     expected = datetime(2025, 7, 23, 14, 56, 18, tzinfo=ZoneInfo("Asia/Seoul"))
 
@@ -111,10 +111,10 @@ def test_station_trade_datetime_when_trade_fields_exist(client, load_fixture, mo
     assert normalized.raw["TRADE_TM"] == "145618"
 
 
-def test_station_trade_datetime_does_not_depend_on_normalized_endpoint(client, load_fixture, monkeypatch, mock_opinet):
+async def test_station_trade_datetime_does_not_depend_on_normalized_endpoint(client, load_fixture, monkeypatch, mock_opinet):
     mock_opinet.add("lowTop10.do", json=load_fixture("low_top10_with_trade_context.json"))
 
-    station = client.get_lowest_price_top20(ProductCode.GASOLINE, cnt=1)[0]
+    station = (await client.get_lowest_price_top20(ProductCode.GASOLINE, cnt=1))[0]
     expected = datetime(2025, 7, 23, 14, 56, 18, tzinfo=ZoneInfo("Asia/Seoul"))
 
     assert station.to_normalized(endpoint="lowTop10.do").provider_endpoint == "lowTop10.do"
@@ -127,10 +127,10 @@ def test_station_trade_datetime_does_not_depend_on_normalized_endpoint(client, l
     assert station.trade_datetime() == expected
 
 
-def test_station_detail_to_normalized_record(client, load_fixture, mock_opinet):
+async def test_station_detail_to_normalized_record(client, load_fixture, mock_opinet):
     mock_opinet.add("detailById.do", json=load_fixture("detail_by_id_A0010207.json"))
 
-    detail = client.get_station_detail("A0010207")
+    detail = (await client.get_station_detail("A0010207"))
     normalized = detail.to_normalized(endpoint="detailById.do")
 
     assert isinstance(normalized, NormalizedFuelStationDetail)
@@ -176,10 +176,10 @@ def test_station_detail_to_normalized_record(client, load_fixture, mock_opinet):
     assert payload["prices"][0]["trade_time"] == "14:56:18"
 
 
-def test_area_code_to_normalized_region_code(client, load_fixture, mock_opinet):
+async def test_area_code_to_normalized_region_code(client, load_fixture, mock_opinet):
     mock_opinet.add("areaCode.do", json=load_fixture("area_code_sido_01.json"))
 
-    area = client.get_area_codes("01")[1]
+    area = (await client.get_area_codes("01"))[1]
     normalized = area.to_normalized()
 
     assert isinstance(normalized, NormalizedFuelRegionCode)
@@ -193,10 +193,10 @@ def test_area_code_to_normalized_region_code(client, load_fixture, mock_opinet):
     assert normalized.raw["AREA_CD"] == "0113"
 
 
-def test_json_safe_raw_helper_converts_mapping_proxy_and_tuples(client, load_fixture, mock_opinet):
+async def test_json_safe_raw_helper_converts_mapping_proxy_and_tuples(client, load_fixture, mock_opinet):
     mock_opinet.add("detailById.do", json=load_fixture("detail_by_id_A0010207.json"))
 
-    detail = client.get_station_detail("A0010207")
+    detail = (await client.get_station_detail("A0010207"))
     raw = to_json_safe_raw(detail.raw)
 
     assert isinstance(raw, dict)

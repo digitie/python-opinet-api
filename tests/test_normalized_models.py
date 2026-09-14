@@ -59,10 +59,10 @@ def test_area_code_invalid_level_raises(code):
         _ = area.code_level
 
 
-def test_avg_price_normalized_fields_and_raw(client, load_fixture, mock_opinet):
+async def test_avg_price_normalized_fields_and_raw(client, load_fixture, mock_opinet):
     mock_opinet.add("avgAllPrice.do", json=load_fixture("avg_all_price.json"))
 
-    rows = client.get_national_average_price()
+    rows = (await client.get_national_average_price())
     premium = rows[0]
 
     assert premium.provider_product_code == "B034"
@@ -74,10 +74,10 @@ def test_avg_price_normalized_fields_and_raw(client, load_fixture, mock_opinet):
         premium.raw["PRICE"] = "0"
 
 
-def test_station_request_product_context_coordinates_and_raw(client, load_fixture, mock_opinet):
+async def test_station_request_product_context_coordinates_and_raw(client, load_fixture, mock_opinet):
     mock_opinet.add("lowTop10.do", json=load_fixture("low_top10_B027.json"))
 
-    stations = client.get_lowest_price_top20(ProductCode.GASOLINE, cnt=2, area="01")
+    stations = (await client.get_lowest_price_top20(ProductCode.GASOLINE, cnt=2, area="01"))
     station = stations[0]
 
     assert station.product_code is ProductCode.GASOLINE
@@ -96,10 +96,10 @@ def test_station_request_product_context_coordinates_and_raw(client, load_fixtur
         station.raw["PRICE"] = "0"
 
 
-def test_station_response_product_and_trade_context_prefer_response(client, load_fixture, mock_opinet):
+async def test_station_response_product_and_trade_context_prefer_response(client, load_fixture, mock_opinet):
     mock_opinet.add("lowTop10.do", json=load_fixture("low_top10_with_trade_context.json"))
 
-    stations = client.get_lowest_price_top20(ProductCode.GASOLINE, cnt=1)
+    stations = (await client.get_lowest_price_top20(ProductCode.GASOLINE, cnt=1))
     station = stations[0]
 
     assert station.product_code is ProductCode.DIESEL
@@ -113,24 +113,24 @@ def test_station_response_product_and_trade_context_prefer_response(client, load
     assert station.raw["TRADE_TM"] == "145618"
 
 
-def test_around_station_request_product_context(client, load_fixture, mock_opinet):
+async def test_around_station_request_product_context(client, load_fixture, mock_opinet):
     mock_opinet.add("aroundAll.do", json=load_fixture("around_all_gangnam.json"))
 
-    stations = client.search_stations_around(
+    stations = (await client.search_stations_around(
         lon=127.0276,
         lat=37.4979,
         prodcd=ProductCode.DIESEL,
-    )
+    ))
 
     assert stations[0].product_code is ProductCode.DIESEL
     assert stations[0].provider_product_code == "D047"
     assert stations[0].fuel_type is FuelType.DIESEL
 
 
-def test_station_detail_and_oil_price_raw_preserve_nested_strings(client, load_fixture, mock_opinet):
+async def test_station_detail_and_oil_price_raw_preserve_nested_strings(client, load_fixture, mock_opinet):
     mock_opinet.add("detailById.do", json=load_fixture("detail_by_id_A0010207.json"))
 
-    detail = client.get_station_detail("A0010207")
+    detail = (await client.get_station_detail("A0010207"))
     first_price = detail.prices[0]
 
     assert detail.raw["UNI_ID"] == "A0010207"

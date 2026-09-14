@@ -9,7 +9,7 @@ import math
 
 import pytest
 
-from opinet import AsyncOpinetClient, OpinetClient
+from opinet import OpinetClient
 from opinet.client import _METERS_PER_DEGREE_LAT, _bbox_grid_centers
 from opinet.exceptions import OpinetInvalidParameterError
 
@@ -83,21 +83,19 @@ def test_bbox_grid_centers_rejects_invalid(kwargs: dict) -> None:
         list(_bbox_grid_centers(**params))
 
 
-def test_iter_stations_in_bbox_dedupes_across_cells(
+async def test_iter_stations_in_bbox_dedupes_across_cells(
     client: OpinetClient, load_fixture, mock_opinet
 ) -> None:
     # respx는 같은 fixture를 모든 aroundAll 호출에 반환 → 격자 셀마다 같은 2개 station.
     mock_opinet.add("aroundAll.do", json=load_fixture("around_all_gangnam.json"))
 
-    stations = list(
-        client.iter_stations_in_bbox(
+    stations = [item async for item in client.iter_stations_in_bbox(
             min_lon=127.02,
             min_lat=37.49,
             max_lon=127.07,
             max_lat=37.53,
             radius_m=1000,
-        )
-    )
+        )]
 
     # 여러 격자 셀을 호출했지만 uni_id 기준 dedup → fixture의 고유 2개만.
     assert len(mock_opinet.calls) > 1
@@ -106,20 +104,18 @@ def test_iter_stations_in_bbox_dedupes_across_cells(
     assert len(uni_ids) == len(set(uni_ids))
 
 
-def test_iter_stations_in_bbox_skips_empty_cells(load_fixture, mock_opinet) -> None:
+async def test_iter_stations_in_bbox_skips_empty_cells(load_fixture, mock_opinet) -> None:
     # strict_empty=True여도 빈 셀의 OpinetNoDataError를 흡수하고 빈 결과로 끝난다.
     mock_opinet.add("aroundAll.do", json=load_fixture("empty_oil.json"))
     strict_client = OpinetClient(api_key="test-key", retry_backoff=0, strict_empty=True)
 
-    stations = list(
-        strict_client.iter_stations_in_bbox(
+    stations = [item async for item in strict_client.iter_stations_in_bbox(
             min_lon=127.02,
             min_lat=37.49,
             max_lon=127.05,
             max_lat=37.51,
             radius_m=1000,
-        )
-    )
+        )]
 
     assert stations == []
     assert len(mock_opinet.calls) > 1
@@ -129,7 +125,7 @@ def test_async_iter_stations_in_bbox_dedupes(load_fixture, mock_opinet) -> None:
     mock_opinet.add("aroundAll.do", json=load_fixture("around_all_gangnam.json"))
 
     async def run() -> list:
-        async with AsyncOpinetClient(api_key="test-key", retry_backoff=0) as client:
+        async with OpinetClient(api_key="test-key", retry_backoff=0) as client:
             collected = []
             async for station in client.iter_stations_in_bbox(
                 min_lon=127.02,
