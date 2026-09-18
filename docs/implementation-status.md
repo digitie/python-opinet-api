@@ -6,6 +6,19 @@
 
 `OpinetClient`는 오피넷 공식 오픈 API 페이지에 등재된 5개 엔드포인트만 안정 구현 대상으로 둡니다.
 
+## 2026-09-19 공개 지역별 화면 수집기
+
+공식 open API와 분리된 `opinet.experimental.OpinetBrowserCollector`를 추가했습니다.
+Playwright로 지역별 공개 화면의 시도·시군구·읍면동 선택값을 읽고, 화면 조회 시
+발생하는 `searRgSelect.do` HTML 또는 `searRgCircleAjax.do` JSON 응답에서
+주유소와 충전소 데이터를 typed dataclass로 변환합니다. 기본 주유소 조회 단위는 시군구이며, 필요할 때만
+`query_level="dong"`으로 읍면동별 조회를 선택합니다.
+
+화면 조작 사이의 짧은 무작위 지연과 전체 수집 사이의 기본 10~12시간 무작위
+간격은 요청 부하를 분산하기 위한 정책입니다. 자동화 탐지 우회, 지문 조작,
+CAPTCHA 우회는 구현하지 않습니다. 상세 사용법은 `docs/browser-collection.md`에
+기록했습니다.
+
 | Method | Endpoint | Status | Notes |
 |---|---|---|---|
 | `get_national_average_price()` | `avgAllPrice.do` | Implemented | `TRADE_DT`, `PRICE`, `DIFF`를 Python 타입으로 변환 |

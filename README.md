@@ -13,6 +13,7 @@
 |---|---|---|
 | 공식 클라이언트 (5개 엔드포인트) | `opinet.OpinetClient` | 평균가·최저가·반경검색·상세조회·지역코드 5종을 비동기로 호출 |
 | 실험 클라이언트 (미검증 17종) | `opinet.experimental.OpinetExperimentalClient` | PDF 가이드북의 추가 API, 호출 동작 미보장 |
+| 지역별 화면 수집기 (실험적) | `opinet.experimental.OpinetBrowserCollector` | Playwright로 공개 지역별 화면의 지역·주유소·충전소 응답을 수집 |
 | 좌표 변환 | `opinet.coords.katec_to_wgs84()` / `wgs84_to_katec()` | KATEC ↔ WGS84 좌표 변환 |
 | 시도코드 매핑 | `opinet.codes.opinet_sido_to_bjd()` / `bjd_sido_to_opinet()` | 오피넷 시도코드 ↔ 행정안전부 법정동코드 |
 | API 카탈로그 / 디버그 | `opinet.get_api_catalog_options()`, `OpinetClient.debug()` | 디버그 UI/fixture 생성을 위한 카탈로그·trace 지원 |
@@ -75,6 +76,20 @@ pip install -e .
 pip install -e ".[dev]"
 pytest
 ```
+
+지역별 웹 화면 수집기를 사용하려면 별도 의존성과 Chromium을 설치합니다.
+
+```bash
+pip install -e ".[browser]"
+playwright install chromium
+```
+
+웹 화면 수집기는 공식 API의 대체물이 아닌 실험 기능입니다. 기본적으로
+시군구 단위로 조회해 요청 수를 줄이고, 화면 조작 사이에는 짧은 무작위 지연,
+전체 수집 사이에는 10~12시간 범위의 무작위 간격을 적용합니다. 자동화 탐지
+우회, 브라우저 지문 조작, CAPTCHA 우회는 수행하지 않으며 사이트가 접근을
+거부하면 오류로 중단합니다. 자세한 사용법은
+[`docs/browser-collection.md`](./docs/browser-collection.md)를 참고하세요.
 
 실제 API 서버 테스트를 하려면 저장소에 커밋되지 않는 로컬 `.env`에 키를 넣습니다.
 
