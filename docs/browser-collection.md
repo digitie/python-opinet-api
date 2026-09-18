@@ -48,7 +48,9 @@ asyncio.run(main())
 `headless=False`로 바꾸면 브라우저 창을 표시할 수 있다. 기본 User-Agent와
 Chromium 설정을 사용하며 PC 브라우저로 위장하기 위한 패치나 stealth 플러그인은
 사용하지 않는다. Playwright bundled Chromium 대신 시스템에 설치된 Chrome을
-사용하려면 `browser_channel="chrome"`을 명시할 수 있다.
+사용하려면 호환성 선택지인 `browser_channel="chrome"`을 명시할 수 있다.
+지역 선택 AJAX와 검색 응답이 완료되고 실제 DOM이 갱신된 뒤 다음 단계로 진행하며,
+HTTP 오류·접근 거부·CAPTCHA 응답은 빈 결과로 바꾸지 않고 실패시킨다.
 
 ## 반복 수집과 부하 분산
 
@@ -73,6 +75,7 @@ async def main():
         throttle=OpinetBrowserThrottle(
             action_min_seconds=0.5,
             action_max_seconds=2.0,
+            max_search_requests=10_000,
         )
     )
     stop_event = asyncio.Event()
@@ -84,8 +87,11 @@ asyncio.run(main())
 
 `run_forever()`는 기본적으로 시작할 때 한 번 즉시 실행하고 이후 실행 전에
 무작위 간격을 기다린다. `stop_event.set()` 또는 `asyncio` 작업 취소로 중단할
-수 있다. 실행 중인 수집과 저장을 여러 프로세스에서 동시에 시작하지 않도록
-호출 애플리케이션에서 단일 실행을 보장해야 한다.
+수 있다. 한 실행은 `max_search_requests`를 넘는 지역 조회를 시작하지 않는다.
+저장 실패나 일시적 네트워크 오류 후에도 다음 주기를 예약하려면 `on_error`에
+호출 애플리케이션의 알림 함수를 전달한다. 기본값은 오류를 호출자에게 전파해
+실패를 숨기지 않는다. 실행 중인 수집과 저장을 여러 프로세스에서 동시에 시작하지
+않도록 호출 애플리케이션에서 단일 실행과 마지막 성공 시각을 관리해야 한다.
 
 ## 수집 범위
 
@@ -96,7 +102,8 @@ asyncio.run(main())
 - KATEC 원시 좌표와 변환된 WGS84 `lon`/`lat`
 - `POLL_DIV_CD`/`POLL_DIV_NM`, 전화번호, 주소, 사업자번호, `CB_CD`
 - `VLT_YN`, `SELF_DIV_CD`, `SEL24_YN`, `KPETRO_YN`, `KPETRO_DP_YN`
-- `GOOD_OS_YN`, `GOOD_OS_YN5`, `RGN_FRCS_YN`
+- `GOOD_OS_YN`, `GOOD_OS_YN5`, `RGN_FRCS_YN` (`RGN_FRCS_YN`은 HTML 경로에서
+  provider가 제공하지 않으면 `None`)
 - `CWSH_YN`, `MAINT_YN`, `CVS_YN`, `CS_YN`
 - 할인·적립·사은/오픈행사·온라인행사·기타 안내 문자열
 - 알 수 있는 새 provider 필드를 잃지 않도록 한 원시 JSON 매핑
@@ -116,6 +123,8 @@ asyncio.run(main())
   응답에 의존한다.
 - 화면 구조나 응답 필드가 바뀌면 fixture와 파서를 다시 검증해야 한다.
 - CAPTCHA, 자동화 확인, 접근 거부 화면이 나타나면 우회하지 않고 실패한다.
-- 서비스 약관과 robots 정책, 허용된 데이터 이용 범위를 확인한 뒤 운영한다.
+- 운영 전 [오피넷 이용약관·저작권·공개 API 안내](https://www.opinet.co.kr/user/custapi/openApiInfo.do),
+  robots 정책, 허용된 수집·보관·재배포 범위를 확인하고 필요한 승인과 출처 표시를 확보한다.
+- 공식 API나 사전 협의된 데이터 제공 경로가 있으면 화면 수집보다 우선한다.
 - 수집한 전화번호·사업자번호 등 공개 사업자 정보도 필요한 범위에서만 저장하고
   로그에 원문을 남기지 않는다.
