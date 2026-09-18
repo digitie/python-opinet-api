@@ -6,7 +6,7 @@ from types import SimpleNamespace
 import pytest
 
 from opinet.codes import ProductCode, StationType
-from opinet.exceptions import OpinetServerError
+from opinet.exceptions import OpinetAuthError, OpinetRateLimitError, OpinetServerError
 from opinet.experimental import (
     BrowserRegion,
     OpinetBrowserCollector,
@@ -217,6 +217,9 @@ def test_browser_rows_and_station_properties(region):
     assert browser_module._station_key(station)[2] == station.name
     assert station.raw["B027_P"] == " "
     assert isinstance(station.raw["B027_P"], str)
+    station_repr = repr(station)
+    assert "UNKNOWN_PROVIDER_FIELD" not in station_repr
+    assert station.phone not in station_repr
     with pytest.raises(TypeError):
         station.raw["new"] = "value"
 
@@ -269,6 +272,99 @@ def test_browser_station_merge_and_invalid_row(region):
         )
 
 
+def test_browser_response_validation_and_schema_errors(region):
+    with pytest.raises(OpinetServerError, match="station lists"):
+        parse_browser_response(
+            {"selectVO": {"LPG_YN": "N"}},
+            region=region,
+            station_kind="station",
+            query_level="sigungu",
+        )
+    with pytest.raises(OpinetAuthError):
+        browser_module._validate_response(
+            _FakeResponse("https://www.opinet.co.kr/searRgSelect.do", status=403),
+            "searRgSelect.do",
+        )
+    with pytest.raises(OpinetRateLimitError):
+        browser_module._validate_response(
+            _FakeResponse("https://www.opinet.co.kr/searRgSelect.do", status=429),
+            "searRgSelect.do",
+        )
+    with pytest.raises(OpinetServerError):
+        browser_module._validate_response(
+            _FakeResponse("https://evil.example/searRgSelect.do"),
+            "searRgSelect.do",
+        )
+
+
+def test_browser_lpg_dom_brand_precedence_and_optional_region_flag(region):
+    lpg_raw = browser_module._row_from_illegal_dom_record(
+        {
+            "href": "javascript:fnVolatInfowindow('LPG','Y','')",
+            "title": "불법 충전소",
+            "prices": ["1137"],
+            "labels": [],
+            "body_id": "body1",
+        }
+    )
+    assert lpg_raw["K015_P"] == "1137"
+    assert "B027_P" not in lpg_raw
+
+    station = parse_browser_response(
+        {
+            "list": [
+                _row(
+                    POLL_DIV_CD="SOL",
+                    POLL_DIV_CO="GSC",
+                    RGN_FRCS_YN=" ",
+                )
+            ]
+        },
+        region=region,
+        station_kind="station",
+        query_level="sigungu",
+    )[0]
+    assert station.brand_code == "GSC"
+    assert station.is_region_franchise is None
+
+
+def test_browser_station_merge_preserves_positive_flags(region):
+    station = parse_browser_response(
+        {
+            "list": [
+                _row(
+                    UNI_ID="FLAGS",
+                    SELF_DIV_CD="N",
+                    CWSH_YN="N",
+                    GOOD_OS_YN="N",
+                    RGN_FRCS_YN=" ",
+                )
+            ],
+            "list2": [
+                _row(
+                    UNI_ID="FLAGS",
+                    SELF_DIV_CD="Y",
+                    CWSH_YN="Y",
+                    GOOD_OS_YN="Y",
+                    RGN_FRCS_YN="Y",
+                )
+            ],
+        },
+        region=region,
+        station_kind="station",
+        query_level="sigungu",
+    )[0]
+    assert station.is_self is True
+    assert station.has_carwash is True
+    assert station.is_good is True
+    assert station.is_region_franchise is True
+
+
+def test_browser_throttle_rejects_invalid_request_budget():
+    with pytest.raises(ValueError):
+        OpinetBrowserThrottle(max_search_requests=0)
+
+
 def test_browser_throttle_samples_inside_configured_bounds():
     throttle = OpinetBrowserThrottle(action_min_seconds=0.0, action_max_seconds=0.1)
     rng = random.Random(7)
@@ -294,6 +390,8 @@ def test_browser_collector_rejects_non_opinet_url():
     with pytest.raises(ValueError):
         OpinetBrowserCollector(url="https://example.com/collector")
     with pytest.raises(ValueError):
+        OpinetBrowserCollector(url="https://www.opinet.co.kr.evil.example/searRgSelect.do")
+    with pytest.raises(ValueError):
         OpinetBrowserCollector(timeout_ms=0)
     with pytest.raises(ValueError):
         OpinetBrowserCollector(query_level="invalid")
@@ -317,10 +415,11 @@ def test_browser_loader_reports_optional_dependency(monkeypatch):
 
 
 class _FakeLocator:
-    def __init__(self, *, values=None, current="", on_select=None):
+    def __init__(self, *, values=None, current="", on_select=None, attributes=None):
         self.values = values or []
         self.current = current
         self.on_select = on_select
+        self.attributes = attributes or {}
         self.selected = []
         self.clicked = 0
 
@@ -329,6 +428,9 @@ class _FakeLocator:
 
     async def input_value(self):
         return self.current
+
+    async def get_attribute(self, name):
+        return self.attributes.get(name)
 
     async def select_option(self, *, value):
         self.current = value
@@ -370,6 +472,20 @@ class _FakeRegionPage:
     async def wait_for_timeout(self, milliseconds):
         self.waits.append(milliseconds)
 
+    def expect_response(self, predicate, timeout):
+        assert timeout > 0
+        candidates = (
+            _FakeResponse("https://www.opinet.co.kr/common/sigunguGisSelect.do"),
+            _FakeResponse("https://www.opinet.co.kr/common/geocodeUtmkSelect.do"),
+        )
+        for response in candidates:
+            if predicate(response):
+                return _FakeResponseContext(response)
+        raise AssertionError("fake response predicate did not match")
+
+    async def wait_for_function(self, _script, **_kwargs):
+        return None
+
 
 @pytest.mark.asyncio
 async def test_browser_region_discovery_and_selection_helpers():
@@ -405,10 +521,12 @@ def replace_region(region, **changes):
 
 
 class _FakeResponse:
-    def __init__(self, url, payload=None, content_type="application/json"):
+    def __init__(self, url, payload=None, content_type="application/json", status=200, text_body=""):
         self.url = url
         self.payload = payload
         self.content_type = content_type
+        self.status = status
+        self.text_body = text_body
         self.request = SimpleNamespace(method="POST")
 
     async def header_value(self, _name):
@@ -416,6 +534,9 @@ class _FakeResponse:
 
     async def json(self):
         return self.payload
+
+    async def text(self):
+        return self.text_body
 
 
 class _FakeResponseContext:
@@ -448,6 +569,15 @@ class _FakeSearchPage:
             return _FakeLocator(values=self.records)
         return self.selectors.setdefault(selector, _FakeLocator(current=""))
 
+    def set_region(self, region):
+        self.selectors.update(
+            {
+                "#SIDO_NM0": _FakeLocator(current=region.sido_value),
+                "#SIGUNGU_NM0": _FakeLocator(current=region.sigungu_value),
+                "#DONG_NM": _FakeLocator(current=region.dong_value or ""),
+            }
+        )
+
     def expect_response(self, _predicate, timeout):
         assert timeout > 0
         return _FakeResponseContext(self.response)
@@ -460,9 +590,12 @@ class _FakeSearchPage:
     async def wait_for_timeout(self, milliseconds):
         self.waits.append(milliseconds)
 
+    async def wait_for_function(self, _script, **_kwargs):
+        return None
+
 
 @pytest.mark.asyncio
-async def test_browser_dom_and_search_response_paths(region):
+async def test_browser_dom_and_search_response_paths(monkeypatch, region):
     source_row = _row()
     values = [source_row.get(field, "") for field in browser_module._OS_POP_FIELDS]
     href = "javascript:fn_osPop(" + ",".join(f"'{value}'" for value in values) + ");"
@@ -483,10 +616,16 @@ async def test_browser_dom_and_search_response_paths(region):
         throttle=OpinetBrowserThrottle(action_min_seconds=0.0, action_max_seconds=0.0),
         query_level="sigungu",
     )
+
+    async def select_without_network(_page, _selector, _value):
+        return None
+
+    monkeypatch.setattr(collector, "_select_value", select_without_network)
     dom_page = _FakeSearchPage(
         _FakeResponse("https://www.opinet.co.kr/searRgSelect.do", payload=None, content_type="text/html"),
         records=records,
     )
+    dom_page.set_region(region)
     dom_stations = await collector._read_dom_stations(dom_page, region=region, station_kind="station")
     assert {station.station_id for station in dom_stations} == {"A0000001", "ILLEGAL"}
 
@@ -496,9 +635,10 @@ async def test_browser_dom_and_search_response_paths(region):
             payload={"list": [_row()]},
         )
     )
+    json_page.set_region(region)
     json_stations = await collector._search_region(json_page, region, station_kind="station")
     assert len(json_stations) == 1
-    assert json_page.waits == [1_000]
+    assert json_page.waits == []
 
     html_page = _FakeSearchPage(
         _FakeResponse(
@@ -508,6 +648,7 @@ async def test_browser_dom_and_search_response_paths(region):
         ),
         records=records,
     )
+    html_page.set_region(region)
     html_stations = await collector._search_region(html_page, region, station_kind="lpg")
     assert len(html_stations) == 2
 
@@ -518,16 +659,51 @@ async def test_browser_dom_and_search_response_paths(region):
             content_type="application/json",
         )
     )
+    invalid_json_page.set_region(region)
     with pytest.raises(OpinetServerError):
         await collector._search_region(invalid_json_page, region, station_kind="station")
 
 
+@pytest.mark.asyncio
+async def test_browser_rejects_block_page_and_only_malformed_dom(region):
+    with pytest.raises(OpinetServerError, match="access-block"):
+        await browser_module._reject_blocked_response(
+            _FakeResponse(
+                "https://www.opinet.co.kr/searRgSelect.do",
+                content_type="text/html",
+                text_body="<html>CAPTCHA required</html>",
+            )
+        )
+
+    collector = OpinetBrowserCollector(
+        throttle=OpinetBrowserThrottle(action_min_seconds=0.0, action_max_seconds=0.0)
+    )
+    page = _FakeSearchPage(
+        _FakeResponse("https://www.opinet.co.kr/searRgSelect.do", content_type="text/html"),
+        records=[{"href": "javascript:fn_osPop('broken')"}],
+    )
+    with pytest.raises(OpinetServerError, match="malformed"):
+        await collector._read_dom_stations(page, region=region, station_kind="station")
+
+
 class _FakeTabPage:
     def __init__(self):
-        self.tabs = {"#OS_BTN": _FakeLocator(), "#LPG_BTN": _FakeLocator()}
+        self.tabs = {
+            "#OS_BTN": _FakeLocator(attributes={"class": "on", "aria-selected": "true"}),
+            "#LPG_BTN": _FakeLocator(attributes={"class": "", "aria-selected": "false"}),
+        }
 
     def locator(self, selector):
         return self.tabs[selector]
+
+    def expect_response(self, predicate, timeout):
+        assert timeout > 0
+        response = _FakeResponse("https://www.opinet.co.kr/searRgSelect.do")
+        assert predicate(response)
+        return _FakeResponseContext(response)
+
+    async def wait_for_function(self, _script, **_kwargs):
+        return None
 
 
 @pytest.mark.asyncio
@@ -566,6 +742,17 @@ async def test_browser_collect_page_and_run_forever(monkeypatch, region):
     assert snapshot.stations[0].source_kinds == ("station", "lpg")
     assert calls == ["station", "lpg"]
 
+    limited_collector = OpinetBrowserCollector(
+        throttle=OpinetBrowserThrottle(
+            action_min_seconds=0.0,
+            action_max_seconds=0.0,
+            max_search_requests=1,
+        )
+    )
+    monkeypatch.setattr(limited_collector, "_discover_regions", discover)
+    with pytest.raises(OpinetServerError, match="budget"):
+        await limited_collector.collect_page(_FakeTabPage())
+
     class LoopCollector(OpinetBrowserCollector):
         async def _wait_or_stop(self, _delay, _stop_event):
             return False
@@ -585,6 +772,27 @@ async def test_browser_collect_page_and_run_forever(monkeypatch, region):
 
     await loop_collector.run_forever(sink, stop_event=stop_event, run_immediately=False)
     assert seen == [snapshot]
+
+    error_collector = LoopCollector(
+        throttle=OpinetBrowserThrottle(action_min_seconds=0.0, action_max_seconds=0.0),
+    )
+    error_stop = asyncio.Event()
+    errors = []
+
+    async def failing_collect():
+        raise RuntimeError("temporary")
+
+    async def handle_error(error):
+        errors.append(str(error))
+        error_stop.set()
+
+    error_collector.collect_once = failing_collect
+    await error_collector.run_forever(
+        sink,
+        stop_event=error_stop,
+        on_error=handle_error,
+    )
+    assert errors == ["temporary"]
 
 
 @pytest.mark.asyncio
@@ -614,8 +822,11 @@ async def test_browser_wait_and_collect_once_lifecycle(monkeypatch, region):
     closed = []
 
     class FakePage:
+        url = "https://www.opinet.co.kr/searRgSelect.do"
+
         async def goto(self, url, **kwargs):
             entered.append((url, kwargs))
+            return _FakeResponse(url, content_type="text/html")
 
         async def wait_for_timeout(self, _milliseconds):
             pass

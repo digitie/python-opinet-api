@@ -16,12 +16,13 @@ from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta
 from types import MappingProxyType
 from typing import Any, Literal, TypeAlias
+from urllib.parse import urlsplit
 from zoneinfo import ZoneInfo
 
 from .._convert import strip_or_none, to_bool_yn, to_float_or_none
 from ..codes import ProductCode, StationType, is_alddle
 from ..coords import katec_to_wgs84
-from ..exceptions import OpinetServerError
+from ..exceptions import OpinetAuthError, OpinetRateLimitError, OpinetServerError
 
 BrowserStationKind: TypeAlias = Literal["station", "lpg"]
 BrowserQueryLevel: TypeAlias = Literal["sigungu", "dong"]
@@ -29,6 +30,23 @@ BrowserQueryLevel: TypeAlias = Literal["sigungu", "dong"]
 _SEOUL = ZoneInfo("Asia/Seoul")
 _SEARCH_ENDPOINT = "searRgCircleAjax.do"
 _PAGE_ENDPOINT = "searRgSelect.do"
+_REGION_ENDPOINTS_BY_SELECTOR = {
+    "#SIDO_NM0": ("sigunguGisSelect.do",),
+    "#SIGUNGU_NM0": ("geocodeUtmkSelect.do", _PAGE_ENDPOINT),
+}
+_DEPENDENT_SELECTOR_BY_SELECTOR = {
+    "#SIDO_NM0": "#SIGUNGU_NM0",
+    "#SIGUNGU_NM0": "#DONG_NM",
+}
+_BLOCKED_PAGE_MARKERS = (
+    "captcha",
+    "access denied",
+    "too many requests",
+    "비정상적인 접근",
+    "접근이 제한",
+    "자동화된 접근",
+    "서비스 점검",
+)
 _OS_POP_FIELDS: tuple[str, ...] = (
     "MARKER_P",
     "B034_P",
@@ -89,6 +107,69 @@ _BRAND_NAME_TO_CODE = {
 }
 
 
+def _is_allowed_opinet_url(value: str) -> bool:
+    """오피넷 HTTPS 호스트인지 확인한다."""
+    try:
+        parsed = urlsplit(value)
+        return parsed.scheme == "https" and parsed.hostname == "www.opinet.co.kr" and parsed.port in (None, 443)
+    except ValueError:
+        return False
+
+
+def _has_endpoint(value: str, endpoint: str) -> bool:
+    try:
+        return urlsplit(value).path.rstrip("/").endswith(f"/{endpoint}")
+    except ValueError:
+        return False
+
+
+def _is_post_response(response: Any, endpoint: str) -> bool:
+    request = getattr(response, "request", None)
+    return (
+        getattr(request, "method", "").upper() == "POST"
+        and _is_allowed_opinet_url(str(getattr(response, "url", "")))
+        and _has_endpoint(str(getattr(response, "url", "")), endpoint)
+    )
+
+
+def _matching_endpoint(value: str, endpoints: Sequence[str]) -> str | None:
+    return next((endpoint for endpoint in endpoints if _has_endpoint(value, endpoint)), None)
+
+
+def _validate_response(response: Any, endpoint: str) -> None:
+    """브라우저 응답의 출처·상태 코드를 검증한다."""
+    response_url = str(getattr(response, "url", ""))
+    if not _is_allowed_opinet_url(response_url) or not _has_endpoint(response_url, endpoint):
+        raise OpinetServerError(f"unexpected Opinet browser response URL: {response_url!r}")
+
+    status = getattr(response, "status", None)
+    if not isinstance(status, int) or status < 400:
+        return
+    if status in (401, 403):
+        raise OpinetAuthError(f"Opinet browser response denied access: HTTP {status}", status_code=status)
+    if status == 429:
+        raise OpinetRateLimitError(f"Opinet browser response rate limited: HTTP {status}", status_code=status)
+    if 500 <= status < 600:
+        raise OpinetServerError(f"Opinet browser response failed: HTTP {status}", status_code=status)
+    raise OpinetServerError(f"Opinet browser response failed: HTTP {status}", status_code=status)
+
+
+async def _reject_blocked_response(response: Any) -> None:
+    """차단·CAPTCHA 페이지를 정상적인 빈 결과로 처리하지 않는다."""
+    content_type = ""
+    header_value = getattr(response, "header_value", None)
+    if callable(header_value):
+        content_type = (await header_value("content-type") or "").lower()
+    if "html" not in content_type:
+        return
+    text_method = getattr(response, "text", None)
+    if not callable(text_method):
+        return
+    body = (await text_method())[:20_000].lower()
+    if any(marker in body for marker in _BLOCKED_PAGE_MARKERS):
+        raise OpinetServerError("Opinet browser response appears to be an access-block page")
+
+
 def _freeze_raw_value(value: Any) -> Any:
     if isinstance(value, Mapping):
         return MappingProxyType({str(key): _freeze_raw_value(item) for key, item in value.items()})
@@ -137,6 +218,18 @@ def _parse_station_type(value: Any) -> StationType | None:
         return StationType(text)
     except ValueError:
         return None
+
+
+def _to_optional_bool_yn(value: Any) -> bool | None:
+    text = strip_or_none(value)
+    if text is None:
+        return None
+    upper = text.upper()
+    if upper == "Y":
+        return True
+    if upper == "N":
+        return False
+    return None
 
 
 def _parse_js_string_call(href: str, function_name: str) -> tuple[str, ...]:
@@ -192,7 +285,11 @@ def _row_from_os_pop_href(href: str) -> dict[str, Any]:
     return dict(zip(_OS_POP_FIELDS, values, strict=True))
 
 
-def _row_from_illegal_dom_record(record: Mapping[str, Any]) -> dict[str, Any]:
+def _row_from_illegal_dom_record(
+    record: Mapping[str, Any],
+    *,
+    station_kind: BrowserStationKind | None = None,
+) -> dict[str, Any]:
     """상세 링크가 없는 불법 행의 화면 표시값을 원시 행으로 만든다."""
     href = str(record.get("href") or "")
     values = _parse_js_string_call(href, "fnVolatInfowindow")
@@ -219,7 +316,10 @@ def _row_from_illegal_dom_record(record: Mapping[str, Any]) -> dict[str, Any]:
         "TABLE_BODY_ID": body_id,
         "DOM_VISIBLE_FLAGS": tuple(sorted(labels)),
     }
-    if body_id in {"body1", "body11"}:
+    if station_kind == "lpg" or values[1].strip().upper() == "Y" or "lpg" in body_id.lower():
+        if price_values:
+            raw["K015_P"] = price_values[0]
+    elif body_id in {"body1", "body11"}:
         if price_values:
             raw["B027_P"] = price_values[0]
         if len(price_values) > 1:
@@ -249,6 +349,15 @@ def _as_rows(value: Any, field_name: str) -> tuple[Mapping[str, Any], ...]:
     if isinstance(value, list) and all(isinstance(item, Mapping) for item in value):
         return tuple(value)
     raise OpinetServerError(f"{_SEARCH_ENDPOINT}: {field_name} must be an object, list, or null")
+
+
+def _payload_list_fields(payload: Mapping[str, Any]) -> tuple[str, ...]:
+    fields = [
+        key
+        for key in payload
+        if isinstance(key, str) and (key == "list" or (key.startswith("list") and key[4:].isdigit()))
+    ]
+    return tuple(sorted(fields, key=lambda key: 0 if key == "list" else int(key[4:])))
 
 
 @dataclass(frozen=True, slots=True)
@@ -288,10 +397,10 @@ class BrowserStation:
     name: str
     brand_code: str | None
     brand_name: str | None
-    phone: str | None
-    address: str | None
-    business_number: str | None
-    cb_code: str | None
+    phone: str | None = field(repr=False)
+    address: str | None = field(repr=False)
+    business_number: str | None = field(repr=False)
+    cb_code: str | None = field(repr=False)
     station_type: StationType | None
     katec_x: float | None
     katec_y: float | None
@@ -305,7 +414,7 @@ class BrowserStation:
     is_electronic: bool
     is_good: bool
     is_good_strong: bool
-    is_region_franchise: bool
+    is_region_franchise: bool | None
     has_carwash: bool
     has_maintenance: bool
     has_cvs: bool
@@ -315,7 +424,7 @@ class BrowserStation:
     representative_event_info: str | None
     on_event_info: str | None
     other_business_info: str | None
-    raw: Mapping[str, Any] = field(default_factory=dict)
+    raw: Mapping[str, Any] = field(default_factory=dict, repr=False)
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "raw", _freeze_raw(self.raw))
@@ -349,6 +458,7 @@ class OpinetBrowserThrottle:
     action_max_seconds: float = 1.25
     run_interval_min: timedelta = timedelta(hours=10)
     run_interval_max: timedelta = timedelta(hours=12)
+    max_search_requests: int = 10_000
 
     def __post_init__(self) -> None:
         if self.action_min_seconds < 0 or self.action_max_seconds < self.action_min_seconds:
@@ -359,6 +469,8 @@ class OpinetBrowserThrottle:
             raise ValueError("run_interval_max must be at most 12 hours")
         if self.run_interval_max < self.run_interval_min:
             raise ValueError("run interval bounds are invalid")
+        if self.max_search_requests <= 0:
+            raise ValueError("max_search_requests must be positive")
 
     def sample_action_delay(self, rng: random.Random) -> float:
         """다음 화면 조작 전에 적용할 무작위 대기시간(초)을 반환한다."""
@@ -410,7 +522,7 @@ def _station_from_row(
         source_kinds=(station_kind,),
         station_id=strip_or_none(row.get("UNI_ID")),
         name=strip_or_none(row.get("OS_NM")) or "",
-        brand_code=strip_or_none(row.get("POLL_DIV_CD") or row.get("POLL_DIV_CO")),
+        brand_code=strip_or_none(row.get("POLL_DIV_CO")) or strip_or_none(row.get("POLL_DIV_CD")),
         brand_name=strip_or_none(row.get("POLL_DIV_NM")),
         phone=strip_or_none(row.get("PHN_NO")),
         address=strip_or_none(row.get("RD_ADDR")),
@@ -429,7 +541,7 @@ def _station_from_row(
         is_electronic=to_bool_yn(row.get("KPETRO_DP_YN")),
         is_good=to_bool_yn(row.get("GOOD_OS_YN")),
         is_good_strong=to_bool_yn(row.get("GOOD_OS_YN5")),
-        is_region_franchise=to_bool_yn(row.get("RGN_FRCS_YN")),
+        is_region_franchise=_to_optional_bool_yn(row.get("RGN_FRCS_YN")),
         has_carwash=to_bool_yn(row.get("CWSH_YN")),
         has_maintenance=to_bool_yn(row.get("MAINT_YN")),
         has_cvs=to_bool_yn(row.get("CVS_YN")),
@@ -469,6 +581,22 @@ def _merge_station(left: BrowserStation, right: BrowserStation) -> BrowserStatio
     def prefer(left_value: Any, right_value: Any) -> Any:
         return left_value if left_value not in (None, "") else right_value
 
+    def merge_station_type(left_value: StationType | None, right_value: StationType | None) -> StationType | None:
+        if left_value is None:
+            return right_value
+        if right_value is None or left_value == right_value:
+            return left_value
+        if StationType.BOTH in (left_value, right_value):
+            return StationType.BOTH
+        return left_value
+
+    def merge_optional_bool(left_value: bool | None, right_value: bool | None) -> bool | None:
+        if left_value is True or right_value is True:
+            return True
+        if left_value is False and right_value is False:
+            return False
+        return right_value if left_value is None else left_value
+
     return replace(
         left,
         source_kinds=tuple(dict.fromkeys((*left.source_kinds, *right.source_kinds))),
@@ -480,12 +608,24 @@ def _merge_station(left: BrowserStation, right: BrowserStation) -> BrowserStatio
         address=prefer(left.address, right.address),
         business_number=prefer(left.business_number, right.business_number),
         cb_code=prefer(left.cb_code, right.cb_code),
-        station_type=prefer(left.station_type, right.station_type),
+        station_type=merge_station_type(left.station_type, right.station_type),
         katec_x=prefer(left.katec_x, right.katec_x),
         katec_y=prefer(left.katec_y, right.katec_y),
         lon=prefer(left.lon, right.lon),
         lat=prefer(left.lat, right.lat),
         prices=tuple(prices),
+        is_illegal=left.is_illegal or right.is_illegal,
+        is_self=left.is_self or right.is_self,
+        is_24h=left.is_24h or right.is_24h,
+        is_kpetro=left.is_kpetro or right.is_kpetro,
+        is_electronic=left.is_electronic or right.is_electronic,
+        is_good=left.is_good or right.is_good,
+        is_good_strong=left.is_good_strong or right.is_good_strong,
+        is_region_franchise=merge_optional_bool(left.is_region_franchise, right.is_region_franchise),
+        has_carwash=left.has_carwash or right.has_carwash,
+        has_maintenance=left.has_maintenance or right.has_maintenance,
+        has_cvs=left.has_cvs or right.has_cvs,
+        cs_yn=left.cs_yn or right.cs_yn,
         discount_info=prefer(left.discount_info, right.discount_info),
         save_event_info=prefer(left.save_event_info, right.save_event_info),
         representative_event_info=prefer(left.representative_event_info, right.representative_event_info),
@@ -513,8 +653,12 @@ def parse_browser_response(
     if not isinstance(select_values, Mapping):
         select_values = {}
 
+    list_fields = _payload_list_fields(payload)
+    if not list_fields:
+        raise OpinetServerError(f"{_SEARCH_ENDPOINT}: response does not contain station lists")
+
     stations: dict[tuple[str, ...], BrowserStation] = {}
-    for field_name in ("list", "list2", "list3", "list4"):
+    for field_name in list_fields:
         for row in _as_rows(payload.get(field_name), field_name):
             station = _station_from_row(
                 row,
@@ -567,7 +711,7 @@ class OpinetBrowserCollector:
         throttle: OpinetBrowserThrottle | None = None,
         rng: random.Random | None = None,
     ) -> None:
-        if not url.startswith("https://www.opinet.co.kr/"):
+        if not _is_allowed_opinet_url(url):
             raise ValueError("url must be an HTTPS Opinet URL")
         if timeout_ms <= 0:
             raise ValueError("timeout_ms must be positive")
@@ -588,21 +732,44 @@ class OpinetBrowserCollector:
             launch_options: dict[str, Any] = {"headless": self.headless}
             if self.browser_channel is not None:
                 launch_options["channel"] = self.browser_channel
-            browser = await playwright.chromium.launch(**launch_options)
-            context = await browser.new_context()
-            page = await context.new_page()
+            browser = None
+            context = None
             try:
-                await page.goto(self.url, wait_until="domcontentloaded", timeout=self.timeout_ms)
+                browser = await playwright.chromium.launch(**launch_options)
+                context = await browser.new_context()
+                page = await context.new_page()
+                navigation_response = await page.goto(self.url, wait_until="domcontentloaded", timeout=self.timeout_ms)
+                if navigation_response is None:
+                    raise OpinetServerError("Opinet browser navigation returned no response")
+                _validate_response(navigation_response, _PAGE_ENDPOINT)
+                await _reject_blocked_response(navigation_response)
+                final_url = str(getattr(page, "url", self.url))
+                if not _is_allowed_opinet_url(final_url):
+                    raise OpinetServerError(f"Opinet browser navigation redirected to {final_url!r}")
                 await self._pause(page)
                 return await self.collect_page(page)
             finally:
-                await context.close()
-                await browser.close()
+                if context is not None:
+                    try:
+                        await context.close()
+                    finally:
+                        if browser is not None:
+                            await browser.close()
+                elif browser is not None:
+                    await browser.close()
 
     async def collect_page(self, page: Any) -> OpinetBrowserSnapshot:
         """이미 열린 Playwright 페이지에서 한 번 전체 지역 수집을 실행한다."""
         regions = await self._discover_regions(page)
         query_regions = self._query_regions(regions)
+        if not query_regions:
+            raise OpinetServerError("Opinet browser returned no queryable regions")
+        search_request_count = len(query_regions) * 2
+        if search_request_count > self.throttle.max_search_requests:
+            raise OpinetServerError(
+                "Opinet browser search request budget exceeded: "
+                f"{search_request_count} > {self.throttle.max_search_requests}"
+            )
         stations: dict[tuple[str, ...], BrowserStation] = {}
 
         tab_targets: tuple[tuple[BrowserStationKind, str], ...] = (
@@ -610,8 +777,7 @@ class OpinetBrowserCollector:
             ("lpg", "#LPG_BTN"),
         )
         for station_kind, tab_selector in tab_targets:
-            await page.locator(tab_selector).click(timeout=self.timeout_ms)
-            await self._pause(page)
+            await self._activate_tab(page, station_kind=station_kind, selector=tab_selector)
             for region in query_regions:
                 for station in await self._search_region(
                     page,
@@ -629,12 +795,53 @@ class OpinetBrowserCollector:
             stations=tuple(stations.values()),
         )
 
+    async def _activate_tab(self, page: Any, *, station_kind: BrowserStationKind, selector: str) -> None:
+        locator = page.locator(selector)
+        class_name = (await locator.get_attribute("class") or "").lower()
+        aria_selected = await locator.get_attribute("aria-selected")
+        is_active = aria_selected == "true" or bool(
+            {"on", "active", "selected"}.intersection(class_name.split())
+        )
+        if not is_active:
+            async with page.expect_response(
+                lambda response: _is_post_response(response, _PAGE_ENDPOINT),
+                timeout=self.timeout_ms,
+            ) as response_info:
+                await locator.click(timeout=self.timeout_ms)
+            response = await response_info.value
+            _validate_response(response, _PAGE_ENDPOINT)
+            await _reject_blocked_response(response)
+        await self._pause(page)
+        await self._wait_for_page_ready(page)
+
+    async def _wait_for_page_ready(self, page: Any) -> None:
+        await page.wait_for_function(
+            "() => document.readyState === 'complete'",
+            timeout=self.timeout_ms,
+        )
+
+    async def _wait_for_results_dom(self, page: Any) -> None:
+        await page.wait_for_function(
+            "() => document.readyState === 'complete' && "
+            "document.querySelector('table.tbl_type10') !== null",
+            timeout=self.timeout_ms,
+        )
+
+    async def _wait_for_options(self, page: Any, selector: str) -> None:
+        await page.wait_for_function(
+            "selector => { const element = document.querySelector(selector); "
+            "return element !== null && Array.from(element.options).some(option => option.value.trim() !== ''); }",
+            arg=selector,
+            timeout=self.timeout_ms,
+        )
+
     async def run_forever(
         self,
         sink: Callable[[OpinetBrowserSnapshot], Awaitable[None]],
         *,
         stop_event: asyncio.Event | None = None,
         run_immediately: bool = True,
+        on_error: Callable[[Exception], Awaitable[None]] | None = None,
     ) -> None:
         """수집 결과를 전달하고 10~12시간 무작위 간격으로 반복한다.
 
@@ -647,8 +854,15 @@ class OpinetBrowserCollector:
                 if await self._wait_or_stop(self.throttle.sample_run_interval(self.rng), stop_event):
                     return
             first = False
-            snapshot = await self.collect_once()
-            await sink(snapshot)
+            try:
+                snapshot = await self.collect_once()
+                await sink(snapshot)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                if on_error is None:
+                    raise
+                await on_error(exc)
 
     async def _pause(self, page: Any) -> None:
         delay_ms = round(self.throttle.sample_action_delay(self.rng) * 1000)
@@ -661,11 +875,16 @@ class OpinetBrowserCollector:
             return False
         stop_task = asyncio.create_task(stop_event.wait())
         delay_task = asyncio.create_task(asyncio.sleep(delay.total_seconds()))
-        done, pending = await asyncio.wait({stop_task, delay_task}, return_when=asyncio.FIRST_COMPLETED)
-        for task in pending:
-            task.cancel()
-        await asyncio.gather(*pending, return_exceptions=True)
-        return stop_task in done and stop_task.result()
+        stop_requested = False
+        try:
+            done, _ = await asyncio.wait({stop_task, delay_task}, return_when=asyncio.FIRST_COMPLETED)
+            stop_requested = stop_task in done and stop_task.result()
+        finally:
+            for task in (stop_task, delay_task):
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(stop_task, delay_task, return_exceptions=True)
+        return stop_requested
 
     async def _read_options(self, page: Any, selector: str) -> tuple[tuple[str, str], ...]:
         values = await page.locator(f"{selector} option").evaluate_all(
@@ -685,15 +904,46 @@ class OpinetBrowserCollector:
         current = await locator.input_value()
         if current == value:
             return
-        await locator.select_option(value=value)
+        region_endpoints = _REGION_ENDPOINTS_BY_SELECTOR.get(selector)
+        dependent_selector = _DEPENDENT_SELECTOR_BY_SELECTOR.get(selector)
+        if region_endpoints is None:
+            await locator.select_option(value=value)
+        else:
+            async with page.expect_response(
+                lambda response: any(_is_post_response(response, endpoint) for endpoint in region_endpoints),
+                timeout=self.timeout_ms,
+            ) as response_info:
+                await locator.select_option(value=value)
+            response = await response_info.value
+            response_endpoint = _matching_endpoint(str(response.url), region_endpoints)
+            if response_endpoint is None:
+                raise OpinetServerError("unexpected Opinet region response URL")
+            _validate_response(response, response_endpoint)
+            await _reject_blocked_response(response)
         await self._pause(page)
+        if dependent_selector is not None:
+            await page.wait_for_function(
+                "({selector, value, dependent}) => { "
+                "const current = document.querySelector(selector); "
+                "const next = document.querySelector(dependent); "
+                "return current !== null && current.value === value && "
+                "next !== null && (dependent === '#DONG_NM' || "
+                "Array.from(next.options).some(option => option.value.trim() !== '')); }",
+                arg={"selector": selector, "value": value, "dependent": dependent_selector},
+                timeout=self.timeout_ms,
+            )
 
     async def _discover_regions(self, page: Any) -> list[BrowserRegion]:
         regions: list[BrowserRegion] = []
+        await self._wait_for_options(page, "#SIDO_NM0")
         sidos = await self._read_options(page, "#SIDO_NM0")
+        if not sidos:
+            raise OpinetServerError("Opinet browser returned no sido options")
         for sido_value, sido_name in sidos:
             await self._select_value(page, "#SIDO_NM0", sido_value)
             sigungus = await self._read_options(page, "#SIGUNGU_NM0")
+            if not sigungus:
+                raise OpinetServerError(f"Opinet browser returned no sigungu options for {sido_value!r}")
             for sigungu_value, sigungu_name in sigungus:
                 await self._select_value(page, "#SIGUNGU_NM0", sigungu_value)
                 dongs = await self._read_options(page, "#DONG_NM")
@@ -751,26 +1001,34 @@ class OpinetBrowserCollector:
             """
         )
         stations: dict[tuple[str, ...], BrowserStation] = {}
+        malformed_records = 0
         for record in records:
             if not isinstance(record, Mapping):
+                malformed_records += 1
                 continue
             href = str(record.get("href") or "")
-            if href.startswith("javascript:fn_osPop("):
-                row = _row_from_os_pop_href(href)
-            elif href.startswith("javascript:fnVolatInfowindow("):
-                row = _row_from_illegal_dom_record(record)
-            else:
+            try:
+                if href.startswith("javascript:fn_osPop("):
+                    row = _row_from_os_pop_href(href)
+                elif href.startswith("javascript:fnVolatInfowindow("):
+                    row = _row_from_illegal_dom_record(record, station_kind=station_kind)
+                else:
+                    continue
+                station = _station_from_row(
+                    row,
+                    region=region,
+                    station_kind=station_kind,
+                    query_level=self.query_level,
+                    select_values={},
+                )
+            except (ValueError, OpinetServerError):
+                malformed_records += 1
                 continue
-            station = _station_from_row(
-                row,
-                region=region,
-                station_kind=station_kind,
-                query_level=self.query_level,
-                select_values={},
-            )
             key = _station_key(station)
             previous = stations.get(key)
             stations[key] = station if previous is None else _merge_station(previous, station)
+        if records and not stations and malformed_records:
+            raise OpinetServerError("Opinet browser returned only malformed station rows")
         return tuple(stations.values())
 
     async def _search_region(
@@ -783,19 +1041,31 @@ class OpinetBrowserCollector:
         await self._select_value(page, "#SIDO_NM0", region.sido_value)
         await self._select_value(page, "#SIGUNGU_NM0", region.sigungu_value)
         await self._select_value(page, "#DONG_NM", region.dong_value or "")
+        for selector, expected in (
+            ("#SIDO_NM0", region.sido_value),
+            ("#SIGUNGU_NM0", region.sigungu_value),
+            ("#DONG_NM", region.dong_value or ""),
+        ):
+            actual = await page.locator(selector).input_value()
+            if actual != expected:
+                raise OpinetServerError(
+                    f"Opinet browser selected value mismatch for {selector}: "
+                    f"expected {expected!r}, got {actual!r}"
+                )
+        await self._pause(page)
 
         async with page.expect_response(
-            lambda response: (
-                response.request.method == "POST"
-                and (_SEARCH_ENDPOINT in response.url or _PAGE_ENDPOINT in response.url)
-            ),
+            lambda response: _is_post_response(response, _SEARCH_ENDPOINT)
+            or _is_post_response(response, _PAGE_ENDPOINT),
             timeout=self.timeout_ms,
         ) as response_info:
             await page.get_by_role("link", name="조회", exact=True).click(timeout=self.timeout_ms)
         response = await response_info.value
-        await page.wait_for_timeout(1_000)
+        response_endpoint = _SEARCH_ENDPOINT if _has_endpoint(str(response.url), _SEARCH_ENDPOINT) else _PAGE_ENDPOINT
+        _validate_response(response, response_endpoint)
+        await _reject_blocked_response(response)
         content_type = (await response.header_value("content-type") or "").lower()
-        if _SEARCH_ENDPOINT in response.url or "json" in content_type:
+        if response_endpoint == _SEARCH_ENDPOINT or "json" in content_type:
             payload = await response.json()
             if not isinstance(payload, Mapping):
                 raise OpinetServerError(f"{_SEARCH_ENDPOINT}: response must be a JSON object")
@@ -805,6 +1075,7 @@ class OpinetBrowserCollector:
                 station_kind=station_kind,
                 query_level=self.query_level,
             )
+        await self._wait_for_results_dom(page)
         return await self._read_dom_stations(page, region=region, station_kind=station_kind)
 
 
