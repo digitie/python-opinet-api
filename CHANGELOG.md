@@ -12,6 +12,7 @@ OpinetClient를 native async 하나로 통합했다. 모든 조회·디버그에
 - README 라이선스 표기 오류(MIT → GPL-3.0-or-later)를 실제 `pyproject.toml`/`LICENSE` 값과 일치하도록 정정.
 
 ### Added
+- `opinet.experimental.OpinetBrowserCollector`: Playwright 기반 지역별 공개 화면 수집기. 시도·시군구·읍면동 목록, 주유소·충전소, 유종별 가격·갱신시각, 상표·부가정보·원시 JSON을 보존하며 요청 부하 분산용 무작위 조작 지연과 기본 10~12시간 수집 간격을 제공한다.
 - 서비스키 공백/개행 자동 제거와 `.env` 기본 로드, 공식 5개 API 카탈로그(`get_api_catalog_options()` 등), Streamlit Debug Trace 표시용 `DebugRun`, fixture 저장/replay 문서와 예제 앱(`examples/streamlit_debug_app.py`).
 - `StationDetail.to_normalized()`와 `NormalizedFuelStationDetail`, `NormalizedFuelStationDetailPrice` DTO.
 - PEP 561 `py.typed` marker와 package data 설정. wheel/sdist 설치 후 `import opinet`, downstream mypy smoke 테스트 추가.
