@@ -586,8 +586,9 @@ async def test_lost_navigation_response_checks_current_document(body, blocked):
     class CurrentPage:
         url = "https://www.opinet.co.kr/searRgSelect.do"
 
-        async def wait_for_load_state(self, state):
+        async def wait_for_load_state(self, state, *, timeout):
             assert state == "domcontentloaded"
+            assert timeout == 30_000
 
         async def content(self):
             return body
@@ -607,12 +608,21 @@ async def test_lost_response_does_not_accept_external_or_unrelated_navigation():
             raise RuntimeError("Protocol error (Network.getResponseBody): No resource with given identifier found")
 
     response = LostResponse("https://www.opinet.co.kr/searRgSelect.do", content_type="text/html")
-    for url in ("https://example.com/searRgSelect.do", "https://www.opinet.co.kr/login.do"):
+    for url in (
+        "https://example.com/searRgSelect.do", "https://www.opinet.co.kr/login.do",
+        "https://www.opinet.co.kr/a/searRgSelect.do", "https://www.opinet.co.kr/searRgSelect.do?region=other",
+    ):
         page = SimpleNamespace(url=url)
         with pytest.raises(OpinetServerError, match="navigation"):
             await browser_module._reject_blocked_response(response, page=page)
     with pytest.raises(RuntimeError, match="No resource"):
         await browser_module._reject_blocked_response(response)
+
+    response = LostResponse("https://www.opinet.co.kr/a/searRgSelect.do", content_type="text/html")
+    with pytest.raises(OpinetServerError, match="navigation"):
+        await browser_module._reject_blocked_response(
+            response, page=SimpleNamespace(url="https://www.opinet.co.kr/b/searRgSelect.do")
+        )
 
 
 @pytest.mark.asyncio
