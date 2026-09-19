@@ -576,6 +576,56 @@ class _FakeResponseContext:
         return False
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("body,blocked", [("<html>지역 검색</html>", False), ("<html>CAPTCHA</html>", True)])
+async def test_lost_navigation_response_checks_current_document(body, blocked):
+    class LostResponse(_FakeResponse):
+        async def text(self):
+            raise RuntimeError("Protocol error (Network.getResponseBody): No resource with given identifier found")
+
+    class CurrentPage:
+        url = "https://www.opinet.co.kr/searRgSelect.do"
+
+        async def wait_for_load_state(self, state):
+            assert state == "domcontentloaded"
+
+        async def content(self):
+            return body
+
+    response = LostResponse(CurrentPage.url, content_type="text/html")
+    if blocked:
+        with pytest.raises(OpinetServerError, match="access-block"):
+            await browser_module._reject_blocked_response(response, page=CurrentPage())
+    else:
+        await browser_module._reject_blocked_response(response, page=CurrentPage())
+
+
+@pytest.mark.asyncio
+async def test_lost_response_does_not_accept_external_or_unrelated_navigation():
+    class LostResponse(_FakeResponse):
+        async def text(self):
+            raise RuntimeError("Protocol error (Network.getResponseBody): No resource with given identifier found")
+
+    response = LostResponse("https://www.opinet.co.kr/searRgSelect.do", content_type="text/html")
+    for url in ("https://example.com/searRgSelect.do", "https://www.opinet.co.kr/login.do"):
+        page = SimpleNamespace(url=url)
+        with pytest.raises(OpinetServerError, match="navigation"):
+            await browser_module._reject_blocked_response(response, page=page)
+    with pytest.raises(RuntimeError, match="No resource"):
+        await browser_module._reject_blocked_response(response)
+
+
+@pytest.mark.asyncio
+async def test_unrelated_response_read_failure_is_not_hidden():
+    class FailedResponse(_FakeResponse):
+        async def text(self):
+            raise RuntimeError("Connection closed")
+
+    response = FailedResponse("https://www.opinet.co.kr/searRgSelect.do", content_type="text/html")
+    with pytest.raises(RuntimeError, match="Connection closed"):
+        await browser_module._reject_blocked_response(response, page=SimpleNamespace())
+
+
 class _FakeSearchPage:
     def __init__(self, response, records=()):
         self.response = response

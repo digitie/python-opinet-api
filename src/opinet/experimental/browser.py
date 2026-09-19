@@ -155,7 +155,7 @@ def _validate_response(response: Any, endpoint: str) -> None:
     raise OpinetServerError(f"Opinet browser response failed: HTTP {status}", status_code=status)
 
 
-async def _reject_blocked_response(response: Any) -> None:
+async def _reject_blocked_response(response: Any, *, page: Any = None) -> None:
     """차단·CAPTCHA 페이지를 정상적인 빈 결과로 처리하지 않는다."""
     content_type = ""
     header_value = getattr(response, "header_value", None)
@@ -166,7 +166,27 @@ async def _reject_blocked_response(response: Any) -> None:
     text_method = getattr(response, "text", None)
     if not callable(text_method):
         return
-    body = (await text_method())[:20_000].lower()
+    try:
+        body = await text_method()
+    except Exception as exc:
+        # 같은 검색 문서로 자동 이동하면 Chromium이 이전 응답 본문을 폐기한다.
+        # 이 경우에만 현재 문서를 검증하며 다른 네트워크 오류는 그대로 전파한다.
+        message = str(exc)
+        if (
+            page is None
+            or "Network.getResponseBody" not in message
+            or "No resource with given identifier found" not in message
+            or not _has_endpoint(str(response.url), _PAGE_ENDPOINT)
+        ):
+            raise
+        current_url = str(page.url)
+        if not _is_allowed_opinet_url(current_url) or not _has_endpoint(current_url, _PAGE_ENDPOINT):
+            raise OpinetServerError("unexpected Opinet browser navigation while reading response") from exc
+        await page.wait_for_load_state("domcontentloaded")
+        body = await page.content()
+        if str(page.url) != current_url:
+            raise OpinetServerError("Opinet browser navigation changed while reading document") from exc
+    body = body[:20_000].lower()
     if any(marker in body for marker in _BLOCKED_PAGE_MARKERS):
         raise OpinetServerError("Opinet browser response appears to be an access-block page")
 
@@ -763,7 +783,7 @@ class OpinetBrowserCollector:
                 if navigation_response is None:
                     raise OpinetServerError("Opinet browser navigation returned no response")
                 _validate_response(navigation_response, _PAGE_ENDPOINT)
-                await _reject_blocked_response(navigation_response)
+                await _reject_blocked_response(navigation_response, page=page)
                 final_url = str(getattr(page, "url", self.url))
                 if not _is_allowed_opinet_url(final_url):
                     raise OpinetServerError(f"Opinet browser navigation redirected to {final_url!r}")
@@ -831,7 +851,7 @@ class OpinetBrowserCollector:
                 await locator.click(timeout=self.timeout_ms)
             response = await response_info.value
             _validate_response(response, _PAGE_ENDPOINT)
-            await _reject_blocked_response(response)
+            await _reject_blocked_response(response, page=page)
         await self._pause(page)
         await self._wait_for_page_ready(page)
 
@@ -950,7 +970,7 @@ class OpinetBrowserCollector:
             if response_endpoint is None:
                 raise OpinetServerError("unexpected Opinet region response URL")
             _validate_response(response, response_endpoint)
-            await _reject_blocked_response(response)
+            await _reject_blocked_response(response, page=page)
         await self._pause(page)
         if dependent_selector is not None:
             await page.wait_for_function(
@@ -1094,7 +1114,7 @@ class OpinetBrowserCollector:
         response = await response_info.value
         response_endpoint = _SEARCH_ENDPOINT if _has_endpoint(str(response.url), _SEARCH_ENDPOINT) else _PAGE_ENDPOINT
         _validate_response(response, response_endpoint)
-        await _reject_blocked_response(response)
+        await _reject_blocked_response(response, page=page)
         content_type = (await response.header_value("content-type") or "").lower()
         if response_endpoint == _SEARCH_ENDPOINT or "json" in content_type:
             payload = await response.json()

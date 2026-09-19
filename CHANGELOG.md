@@ -9,6 +9,8 @@ OpinetClient를 native async 하나로 통합했다. 모든 조회·디버그에
 ## [Unreleased]
 
 ### Fixed
+- Playwright가 검색 화면 자동 이동 후 이전 응답 본문을 폐기한 경우 현재 오피넷 검색
+  문서를 검증하도록 수정. 차단 화면·외부 이동·일반 네트워크 오류는 계속 실패 처리.
 - README 라이선스 표기 오류(MIT → GPL-3.0-or-later)를 실제 `pyproject.toml`/`LICENSE` 값과 일치하도록 정정.
 
 ### Added

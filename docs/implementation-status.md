@@ -8,6 +8,10 @@
 
 ## 2026-09-19 공개 지역별 화면 수집기
 
+운영 Chromium에서 검색 화면의 자동 이동 직후 이전 응답 본문이 없어지는 오류를
+확인했다. 같은 출처·검색 문서의 현재 HTML만 대체 검사하도록 보완했으며,
+차단 화면과 외부 이동, 관련 없는 네트워크 오류는 계속 실패로 처리한다.
+
 공식 open API와 분리된 `opinet.experimental.OpinetBrowserCollector`를 추가했습니다.
 Playwright로 지역별 공개 화면의 시도·시군구·읍면동 선택값을 읽고, 화면 조회 시
 발생하는 `searRgSelect.do` HTML 또는 `searRgCircleAjax.do` JSON 응답에서
