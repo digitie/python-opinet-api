@@ -417,7 +417,7 @@ class BrowserFuelPrice:
 
 @dataclass(frozen=True, slots=True)
 class BrowserStation:
-    """오피넷 지역별 검색 화면에서 읽은 주유소 또는 충전소 한 건."""
+    """주유소 또는 충전소 한 건. region은 최초 검색 문맥이며 실제 소재지가 아니다."""
 
     region: BrowserRegion
     query_level: BrowserQueryLevel
@@ -606,7 +606,7 @@ def _station_from_row(
 
 def _station_key(station: BrowserStation) -> tuple[str, ...]:
     if station.station_id is not None:
-        return (station.region.sido_value, station.region.sigungu_value, station.station_id)
+        return ("station", station.station_id)
     return (
         station.region.sido_value,
         station.region.sigungu_value,
@@ -617,15 +617,20 @@ def _station_key(station: BrowserStation) -> tuple[str, ...]:
 
 
 def _merge_station(left: BrowserStation, right: BrowserStation) -> BrowserStation:
+    """동일 UID의 가격·출처를 병합하고 최초 검색 지역을 대표 문맥으로 유지한다."""
     prices: list[BrowserFuelPrice] = []
     right_prices = {item.product_code: item for item in right.prices}
     for item in left.prices:
-        other = right_prices.get(item.product_code)
-        if other is not None and item.price is None and other.price is not None:
-            item = other
-        elif other is not None and item.updated_at is None and other.updated_at is not None:
-            item = replace(item, updated_at=other.updated_at)
+        other = right_prices.pop(item.product_code, None)
+        # 가격과 갱신 시각은 하나의 입력에서 함께 선택한다. 빈 가격으로 덮지 않는다.
+        if other is not None and other.price is not None:
+            if item.price is None or (
+                other.updated_at is not None
+                and (item.updated_at is None or other.updated_at > item.updated_at)
+            ):
+                item = other
         prices.append(item)
+    prices.extend(right_prices.values())
 
     def prefer(left_value: Any, right_value: Any) -> Any:
         return left_value if left_value not in (None, "") else right_value
@@ -637,7 +642,7 @@ def _merge_station(left: BrowserStation, right: BrowserStation) -> BrowserStatio
             return left_value
         if StationType.BOTH in (left_value, right_value):
             return StationType.BOTH
-        return left_value
+        return StationType.BOTH
 
     def merge_optional_bool(left_value: bool | None, right_value: bool | None) -> bool | None:
         if left_value is True or right_value is True:
