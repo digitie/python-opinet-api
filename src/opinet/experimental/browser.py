@@ -11,6 +11,7 @@ import asyncio
 import html
 import importlib
 import random
+import time
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta
@@ -456,19 +457,22 @@ class OpinetBrowserThrottle:
 
     action_min_seconds: float = 0.25
     action_max_seconds: float = 1.25
-    run_interval_min: timedelta = timedelta(hours=10)
-    run_interval_max: timedelta = timedelta(hours=12)
+    run_interval_min: timedelta = timedelta(hours=8)
+    run_interval_max: timedelta = timedelta(hours=8)
+    max_runs_per_24h: int = 3
     max_search_requests: int = 10_000
 
     def __post_init__(self) -> None:
         if self.action_min_seconds < 0 or self.action_max_seconds < self.action_min_seconds:
             raise ValueError("action delay bounds are invalid")
-        if self.run_interval_min < timedelta(hours=10):
-            raise ValueError("run_interval_min must be at least 10 hours")
+        if self.run_interval_min < timedelta(hours=8):
+            raise ValueError("run_interval_min must be at least 8 hours")
         if self.run_interval_max > timedelta(hours=12):
             raise ValueError("run_interval_max must be at most 12 hours")
         if self.run_interval_max < self.run_interval_min:
             raise ValueError("run interval bounds are invalid")
+        if not 1 <= self.max_runs_per_24h <= 3:
+            raise ValueError("max_runs_per_24h must be between 1 and 3")
         if self.max_search_requests <= 0:
             raise ValueError("max_search_requests must be positive")
 
@@ -480,6 +484,23 @@ class OpinetBrowserThrottle:
         """다음 전체 수집까지의 무작위 대기시간을 반환한다."""
         seconds = rng.uniform(self.run_interval_min.total_seconds(), self.run_interval_max.total_seconds())
         return timedelta(seconds=seconds)
+
+
+def _scheduled_run_delay(
+    throttle: OpinetBrowserThrottle,
+    rng: random.Random,
+    run_started_at: Sequence[float],
+    *,
+    now: float,
+) -> tuple[timedelta, list[float]]:
+    """최근 24시간 실행 횟수를 반영한 다음 대기시간을 계산한다."""
+    window_seconds = timedelta(hours=24).total_seconds()
+    recent_runs = [started_at for started_at in run_started_at if started_at > now - window_seconds]
+    delay = throttle.sample_run_interval(rng)
+    if len(recent_runs) >= throttle.max_runs_per_24h:
+        next_available_at = recent_runs[0] + window_seconds
+        delay = max(delay, timedelta(seconds=max(0.0, next_available_at - now)))
+    return delay, recent_runs
 
 
 def _station_from_row(
@@ -697,7 +718,7 @@ class OpinetBrowserCollector:
     ``headless``는 브라우저 표시 여부만 제어한다. 기본 브라우저 설정과
     기본 User-Agent를 사용하며, PC 브라우저로 위장하기 위한 패치나 stealth
     플러그인은 적용하지 않는다. 부하 분산을 위해 화면 조작 사이에는 짧은
-    무작위 대기, 전체 수집 사이에는 기본 10~12시간의 무작위 대기를 사용한다.
+    무작위 대기, 전체 수집 사이에는 기본 8시간의 대기를 사용한다.
     """
 
     def __init__(
@@ -843,17 +864,27 @@ class OpinetBrowserCollector:
         run_immediately: bool = True,
         on_error: Callable[[Exception], Awaitable[None]] | None = None,
     ) -> None:
-        """수집 결과를 전달하고 10~12시간 무작위 간격으로 반복한다.
+        """수집 결과를 전달하고 하루 최대 3회, 기본 8시간 간격으로 반복한다.
 
         ``stop_event``가 설정되거나 작업이 취소되면 대기와 다음 실행을
-        중단한다. 수집 결과 저장은 호출자가 제공한 ``sink``의 책임이다.
+        중단한다. 최근 24시간 실행 횟수가 ``max_runs_per_24h``에 도달하면
+        다음 실행 가능 시각까지 기다린다. 수집 결과 저장은 호출자가 제공한
+        ``sink``의 책임이다.
         """
         first = True
+        run_started_at: list[float] = []
         while stop_event is None or not stop_event.is_set():
             if not first or not run_immediately:
-                if await self._wait_or_stop(self.throttle.sample_run_interval(self.rng), stop_event):
+                delay, run_started_at = _scheduled_run_delay(
+                    self.throttle,
+                    self.rng,
+                    run_started_at,
+                    now=time.monotonic(),
+                )
+                if await self._wait_or_stop(delay, stop_event):
                     return
             first = False
+            run_started_at.append(time.monotonic())
             try:
                 snapshot = await self.collect_once()
                 await sink(snapshot)

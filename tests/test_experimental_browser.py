@@ -372,18 +372,37 @@ def test_browser_throttle_samples_inside_configured_bounds():
     run_delay = throttle.sample_run_interval(rng)
 
     assert 0.0 <= action_delay <= 0.1
-    assert timedelta(hours=10) <= run_delay <= timedelta(hours=12)
+    assert run_delay == timedelta(hours=8)
+    assert throttle.max_runs_per_24h == 3
 
 
 def test_browser_throttle_rejects_intervals_outside_load_policy():
     with pytest.raises(ValueError):
-        OpinetBrowserThrottle(run_interval_min=timedelta(hours=9))
+        OpinetBrowserThrottle(run_interval_min=timedelta(hours=7))
     with pytest.raises(ValueError):
         OpinetBrowserThrottle(run_interval_max=timedelta(hours=13))
+    with pytest.raises(ValueError):
+        OpinetBrowserThrottle(max_runs_per_24h=4)
     with pytest.raises(ValueError):
         OpinetBrowserThrottle(action_min_seconds=2.0, action_max_seconds=1.0)
     with pytest.raises(ValueError):
         OpinetBrowserThrottle(run_interval_min=timedelta(hours=11), run_interval_max=timedelta(hours=10))
+
+
+def test_browser_throttle_delays_when_daily_run_budget_is_reached():
+    throttle = OpinetBrowserThrottle(
+        run_interval_min=timedelta(hours=8),
+        run_interval_max=timedelta(hours=8),
+    )
+    delay, recent_runs = browser_module._scheduled_run_delay(
+        throttle,
+        random.Random(7),
+        [0.0, 60 * 60, 2 * 60 * 60],
+        now=2 * 60 * 60 + 60,
+    )
+
+    assert recent_runs == [0.0, 60 * 60, 2 * 60 * 60]
+    assert delay == timedelta(hours=21, minutes=59)
 
 
 def test_browser_collector_rejects_non_opinet_url():
