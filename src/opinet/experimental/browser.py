@@ -155,7 +155,7 @@ def _validate_response(response: Any, endpoint: str) -> None:
     raise OpinetServerError(f"Opinet browser response failed: HTTP {status}", status_code=status)
 
 
-async def _reject_blocked_response(response: Any) -> None:
+async def _reject_blocked_response(response: Any, *, page: Any = None, timeout_ms: int = 30_000) -> None:
     """차단·CAPTCHA 페이지를 정상적인 빈 결과로 처리하지 않는다."""
     content_type = ""
     header_value = getattr(response, "header_value", None)
@@ -166,7 +166,35 @@ async def _reject_blocked_response(response: Any) -> None:
     text_method = getattr(response, "text", None)
     if not callable(text_method):
         return
-    body = (await text_method())[:20_000].lower()
+    try:
+        body = await text_method()
+    except Exception as exc:
+        # 같은 검색 문서로 자동 이동하면 Chromium이 이전 응답 본문을 폐기한다.
+        # 이 경우에만 현재 문서를 검증하며 다른 네트워크 오류는 그대로 전파한다.
+        message = str(exc)
+        if (
+            page is None
+            or "Network.getResponseBody" not in message
+            or "No resource with given identifier found" not in message
+            or not _has_endpoint(str(response.url), _PAGE_ENDPOINT)
+        ):
+            raise
+        current_url = str(page.url)
+        response_url = str(response.url)
+        response_parts = urlsplit(response_url)
+        current_parts = urlsplit(current_url)
+        if (
+            not _is_allowed_opinet_url(response_url)
+            or not _is_allowed_opinet_url(current_url)
+            or response_parts.path != "/searRgSelect.do"
+            or (current_parts.path, current_parts.query) != (response_parts.path, response_parts.query)
+        ):
+            raise OpinetServerError("unexpected Opinet browser navigation while reading response") from exc
+        await page.wait_for_load_state("domcontentloaded", timeout=timeout_ms)
+        body = await page.content()
+        if str(page.url) != current_url:
+            raise OpinetServerError("Opinet browser navigation changed while reading document") from exc
+    body = body[:20_000].lower()
     if any(marker in body for marker in _BLOCKED_PAGE_MARKERS):
         raise OpinetServerError("Opinet browser response appears to be an access-block page")
 
@@ -389,7 +417,7 @@ class BrowserFuelPrice:
 
 @dataclass(frozen=True, slots=True)
 class BrowserStation:
-    """오피넷 지역별 검색 화면에서 읽은 주유소 또는 충전소 한 건."""
+    """주유소 또는 충전소 한 건. region은 최초 검색 문맥이며 실제 소재지가 아니다."""
 
     region: BrowserRegion
     query_level: BrowserQueryLevel
@@ -578,7 +606,7 @@ def _station_from_row(
 
 def _station_key(station: BrowserStation) -> tuple[str, ...]:
     if station.station_id is not None:
-        return (station.region.sido_value, station.region.sigungu_value, station.station_id)
+        return ("station", station.station_id)
     return (
         station.region.sido_value,
         station.region.sigungu_value,
@@ -589,15 +617,20 @@ def _station_key(station: BrowserStation) -> tuple[str, ...]:
 
 
 def _merge_station(left: BrowserStation, right: BrowserStation) -> BrowserStation:
+    """동일 UID의 가격·출처를 병합하고 최초 검색 지역을 대표 문맥으로 유지한다."""
     prices: list[BrowserFuelPrice] = []
     right_prices = {item.product_code: item for item in right.prices}
     for item in left.prices:
-        other = right_prices.get(item.product_code)
-        if other is not None and item.price is None and other.price is not None:
-            item = other
-        elif other is not None and item.updated_at is None and other.updated_at is not None:
-            item = replace(item, updated_at=other.updated_at)
+        other = right_prices.pop(item.product_code, None)
+        # 가격과 갱신 시각은 하나의 입력에서 함께 선택한다. 빈 가격으로 덮지 않는다.
+        if other is not None and other.price is not None:
+            if item.price is None or (
+                other.updated_at is not None
+                and (item.updated_at is None or other.updated_at > item.updated_at)
+            ):
+                item = other
         prices.append(item)
+    prices.extend(right_prices.values())
 
     def prefer(left_value: Any, right_value: Any) -> Any:
         return left_value if left_value not in (None, "") else right_value
@@ -609,7 +642,7 @@ def _merge_station(left: BrowserStation, right: BrowserStation) -> BrowserStatio
             return left_value
         if StationType.BOTH in (left_value, right_value):
             return StationType.BOTH
-        return left_value
+        return StationType.BOTH
 
     def merge_optional_bool(left_value: bool | None, right_value: bool | None) -> bool | None:
         if left_value is True or right_value is True:
@@ -763,7 +796,7 @@ class OpinetBrowserCollector:
                 if navigation_response is None:
                     raise OpinetServerError("Opinet browser navigation returned no response")
                 _validate_response(navigation_response, _PAGE_ENDPOINT)
-                await _reject_blocked_response(navigation_response)
+                await _reject_blocked_response(navigation_response, page=page, timeout_ms=self.timeout_ms)
                 final_url = str(getattr(page, "url", self.url))
                 if not _is_allowed_opinet_url(final_url):
                     raise OpinetServerError(f"Opinet browser navigation redirected to {final_url!r}")
@@ -831,7 +864,7 @@ class OpinetBrowserCollector:
                 await locator.click(timeout=self.timeout_ms)
             response = await response_info.value
             _validate_response(response, _PAGE_ENDPOINT)
-            await _reject_blocked_response(response)
+            await _reject_blocked_response(response, page=page, timeout_ms=self.timeout_ms)
         await self._pause(page)
         await self._wait_for_page_ready(page)
 
@@ -950,7 +983,7 @@ class OpinetBrowserCollector:
             if response_endpoint is None:
                 raise OpinetServerError("unexpected Opinet region response URL")
             _validate_response(response, response_endpoint)
-            await _reject_blocked_response(response)
+            await _reject_blocked_response(response, page=page, timeout_ms=self.timeout_ms)
         await self._pause(page)
         if dependent_selector is not None:
             await page.wait_for_function(
@@ -1094,7 +1127,7 @@ class OpinetBrowserCollector:
         response = await response_info.value
         response_endpoint = _SEARCH_ENDPOINT if _has_endpoint(str(response.url), _SEARCH_ENDPOINT) else _PAGE_ENDPOINT
         _validate_response(response, response_endpoint)
-        await _reject_blocked_response(response)
+        await _reject_blocked_response(response, page=page, timeout_ms=self.timeout_ms)
         content_type = (await response.header_value("content-type") or "").lower()
         if response_endpoint == _SEARCH_ENDPOINT or "json" in content_type:
             payload = await response.json()

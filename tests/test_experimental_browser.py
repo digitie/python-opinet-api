@@ -1,4 +1,5 @@
 import asyncio
+from dataclasses import replace
 from datetime import datetime, timedelta
 import random
 from types import SimpleNamespace
@@ -576,6 +577,66 @@ class _FakeResponseContext:
         return False
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("body,blocked", [("<html>지역 검색</html>", False), ("<html>CAPTCHA</html>", True)])
+async def test_lost_navigation_response_checks_current_document(body, blocked):
+    class LostResponse(_FakeResponse):
+        async def text(self):
+            raise RuntimeError("Protocol error (Network.getResponseBody): No resource with given identifier found")
+
+    class CurrentPage:
+        url = "https://www.opinet.co.kr/searRgSelect.do"
+
+        async def wait_for_load_state(self, state, *, timeout):
+            assert state == "domcontentloaded"
+            assert timeout == 30_000
+
+        async def content(self):
+            return body
+
+    response = LostResponse(CurrentPage.url, content_type="text/html")
+    if blocked:
+        with pytest.raises(OpinetServerError, match="access-block"):
+            await browser_module._reject_blocked_response(response, page=CurrentPage())
+    else:
+        await browser_module._reject_blocked_response(response, page=CurrentPage())
+
+
+@pytest.mark.asyncio
+async def test_lost_response_does_not_accept_external_or_unrelated_navigation():
+    class LostResponse(_FakeResponse):
+        async def text(self):
+            raise RuntimeError("Protocol error (Network.getResponseBody): No resource with given identifier found")
+
+    response = LostResponse("https://www.opinet.co.kr/searRgSelect.do", content_type="text/html")
+    for url in (
+        "https://example.com/searRgSelect.do", "https://www.opinet.co.kr/login.do",
+        "https://www.opinet.co.kr/a/searRgSelect.do", "https://www.opinet.co.kr/searRgSelect.do?region=other",
+    ):
+        page = SimpleNamespace(url=url)
+        with pytest.raises(OpinetServerError, match="navigation"):
+            await browser_module._reject_blocked_response(response, page=page)
+    with pytest.raises(RuntimeError, match="No resource"):
+        await browser_module._reject_blocked_response(response)
+
+    response = LostResponse("https://www.opinet.co.kr/a/searRgSelect.do", content_type="text/html")
+    with pytest.raises(OpinetServerError, match="navigation"):
+        await browser_module._reject_blocked_response(
+            response, page=SimpleNamespace(url="https://www.opinet.co.kr/b/searRgSelect.do")
+        )
+
+
+@pytest.mark.asyncio
+async def test_unrelated_response_read_failure_is_not_hidden():
+    class FailedResponse(_FakeResponse):
+        async def text(self):
+            raise RuntimeError("Connection closed")
+
+    response = FailedResponse("https://www.opinet.co.kr/searRgSelect.do", content_type="text/html")
+    with pytest.raises(RuntimeError, match="Connection closed"):
+        await browser_module._reject_blocked_response(response, page=SimpleNamespace())
+
+
 class _FakeSearchPage:
     def __init__(self, response, records=()):
         self.response = response
@@ -723,6 +784,63 @@ class _FakeTabPage:
 
     async def wait_for_function(self, _script, **_kwargs):
         return None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("reverse", [False, True])
+async def test_browser_collect_page_merges_uid_across_query_regions(monkeypatch, region, reverse):
+    region = replace(region, dong_value=None, dong_name=None)
+    other_region = replace(region, sigungu_value="다른구", sigungu_name="다른구")
+    gas = parse_browser_response(
+        {"list": [_row(B027_P="1700", B027_DT="", D047_P="99999", D047_DT="")]},
+        region=region, station_kind="station", query_level="sigungu",
+    )[0]
+    lpg = parse_browser_response(
+        {"list": [_row(B027_P="99999", B027_DT="", D047_P="99999", D047_DT="", K015_P="1100", LPG_YN="Y")]},
+        region=other_region, station_kind="lpg", query_level="sigungu",
+    )[0]
+    inputs = [gas, lpg] if not reverse else [lpg, gas]
+    collector = OpinetBrowserCollector(throttle=OpinetBrowserThrottle(action_min_seconds=0, action_max_seconds=0))
+
+    async def discover(_page):
+        return [item.region for item in inputs]
+
+    async def search(_page, query_region, *, station_kind):
+        return tuple(item for item in inputs if item.region.sigungu_key == query_region.sigungu_key)
+
+    monkeypatch.setattr(collector, "_discover_regions", discover)
+    monkeypatch.setattr(collector, "_search_region", search)
+    snapshot = await collector.collect_page(_FakeTabPage())
+    assert len(snapshot.stations) == 1
+    merged = snapshot.stations[0]
+    assert merged.region == inputs[0].region
+    assert set(merged.source_kinds) == {"station", "lpg"}
+    assert merged.station_type is StationType.BOTH
+    assert merged.price_by_product[ProductCode.GASOLINE].price == 1700
+    assert merged.price_by_product[ProductCode.LPG].price == 1100
+    assert browser_module._station_key(replace(gas, station_id=None)) != browser_module._station_key(replace(lpg, station_id=None))
+
+
+@pytest.mark.parametrize(
+    "left_price,left_time,right_price,right_time,expected_price,expected_time",
+    [
+        ("1700", "2026-09-18 18:00:00", "1800", "2026-09-18 19:00:00", 1800, "2026-09-18 19:00:00"),
+        ("1800", "2026-09-18 19:00:00", "1700", "2026-09-18 18:00:00", 1800, "2026-09-18 19:00:00"),
+        ("1700", "", "99999", "2026-09-18 19:00:00", 1700, ""),
+        ("1700", "", "1800", "2026-09-18 19:00:00", 1800, "2026-09-18 19:00:00"),
+        ("1700", "2026-09-18 19:00:00", "1800", "", 1700, "2026-09-18 19:00:00"),
+        ("1700", "", "1800", "", 1700, ""),
+        ("1700", "2026-09-18 19:00:00", "1800", "2026-09-18 19:00:00", 1700, "2026-09-18 19:00:00"),
+    ],
+)
+def test_browser_price_merge_keeps_value_and_time_together(region, left_price, left_time, right_price, right_time, expected_price, expected_time):
+    station = parse_browser_response(
+        {"list": [_row(B027_P=left_price, B027_DT=left_time), _row(B027_P=right_price, B027_DT=right_time)]},
+        region=region, station_kind="station", query_level="sigungu",
+    )[0]
+    price = station.price_by_product[ProductCode.GASOLINE]
+    assert price.price == expected_price
+    assert price.updated_at == browser_module._parse_provider_datetime(expected_time)
 
 
 @pytest.mark.asyncio

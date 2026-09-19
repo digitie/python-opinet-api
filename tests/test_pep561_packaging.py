@@ -71,8 +71,8 @@ def test_built_distribution_install_import_and_downstream_mypy(
     python = _venv_python(venv_dir)
 
     install_args = [str(python), "-m", "pip", "install"]
-    if dist_kind == "sdist":
-        install_args.append("--no-build-isolation")
+    # 중첩 venv는 테스트 실행 venv의 빌드 도구를 상속하지 않으므로
+    # sdist도 기본 PEP 517 격리 환경에서 선언된 빌드 의존성을 설치한다.
     _run([*install_args, str(built_distributions[dist_kind])], cwd=tmp_path)
 
     import_smoke = tmp_path / f"import_smoke_{dist_kind}.py"
