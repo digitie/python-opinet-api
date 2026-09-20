@@ -760,7 +760,7 @@ class OpinetBrowserCollector:
         url: str = "https://www.opinet.co.kr/searRgSelect.do",
         headless: bool = True,
         browser_channel: str | None = None,
-        timeout_ms: int = 30_000,
+        timeout_ms: int = 60_000,
         query_level: BrowserQueryLevel = "sigungu",
         throttle: OpinetBrowserThrottle | None = None,
         rng: random.Random | None = None,
