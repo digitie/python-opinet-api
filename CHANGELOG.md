@@ -28,6 +28,8 @@ OpinetClient를 native async 하나로 통합했다. 모든 조회·디버그에
 - `opinet-api.md` 초기 명세서 작성. 공식 사이트 기준 5개 API 검증, 시도코드/필드 의미 정정.
 
 ### Changed
+- Playwright 공개 화면 수집기의 기본 `timeout_ms`를 30초에서 60초로 늘렸다. 지연된
+  화면 응답을 기다리는 제한만 조정하며, 추가 요청·자동 재시도·접근 제한 우회는 하지 않는다.
 - Playwright 지역별 화면 수집기의 기본 반복 주기를 8시간으로 조정하고, 하나의 반복 작업이 최근 24시간에 최대 3회만 실행되도록 제한.
 - Windows/PowerShell 환경에서 `rg` 실행이 권한 문제로 실패할 때의 우회 명령(`git ls-files`, `Get-ChildItem -Recurse -File`, `Select-String`)을 문서화.
 - 문서의 파일 위치 표기를 프로젝트 루트 기준 상대 경로로 고정하고, Python 내부 문서(docstring/주석)는 한글로 작성한다는 규칙을 추가.

@@ -407,6 +407,8 @@ def test_browser_throttle_delays_when_daily_run_budget_is_reached():
 
 
 def test_browser_collector_rejects_non_opinet_url():
+    assert OpinetBrowserCollector().timeout_ms == 60_000
+    assert OpinetBrowserCollector(timeout_ms=30_000).timeout_ms == 30_000
     with pytest.raises(ValueError):
         OpinetBrowserCollector(url="https://example.com/collector")
     with pytest.raises(ValueError):
