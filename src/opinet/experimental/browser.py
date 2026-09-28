@@ -12,18 +12,21 @@ import html
 import importlib
 import random
 import time
+from collections import deque
 from collections.abc import Awaitable, Callable, Mapping, Sequence
+from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta
 from types import MappingProxyType
 from typing import Any, Literal, TypeAlias
+from typing import Iterator
 from urllib.parse import urlsplit
 from zoneinfo import ZoneInfo
 
 from .._convert import strip_or_none, to_bool_yn, to_float_or_none
 from ..codes import ProductCode, StationType, is_alddle
 from ..coords import katec_to_wgs84
-from ..exceptions import OpinetAuthError, OpinetRateLimitError, OpinetServerError
+from ..exceptions import OpinetAuthError, OpinetError, OpinetRateLimitError, OpinetServerError
 
 BrowserStationKind: TypeAlias = Literal["station", "lpg"]
 BrowserQueryLevel: TypeAlias = Literal["sigungu", "dong"]
@@ -195,8 +198,52 @@ async def _reject_blocked_response(response: Any, *, page: Any = None, timeout_m
         if str(page.url) != current_url:
             raise OpinetServerError("Opinet browser navigation changed while reading document") from exc
     body = body[:20_000].lower()
+    if "the service is not available." in body:
+        raise OpinetServerError("Opinet browser returned a service-unavailable page")
     if any(marker in body for marker in _BLOCKED_PAGE_MARKERS):
         raise OpinetServerError("Opinet browser response appears to be an access-block page")
+
+
+@contextmanager
+def _observe_browser_action(page: Any, phase: str) -> Iterator[None]:
+    """실패 단계와 최근 요청 종류만 남기고 URL·본문·헤더는 노출하지 않는다."""
+    events: deque[str] = deque(maxlen=8)
+    endpoints = {_PAGE_ENDPOINT, _SEARCH_ENDPOINT, "sigunguGisSelect.do", "geocodeUtmkSelect.do"}
+
+    def describe(request: Any) -> str:
+        method = request.method if request.method in {"GET", "POST"} else "other"
+        endpoint = _matching_endpoint(str(request.url), tuple(endpoints))
+        source = endpoint if _is_allowed_opinet_url(str(request.url)) and endpoint else "other"
+        return f"{method}:{source}"
+
+    def requested(request: Any) -> None:
+        if request.resource_type in {"document", "xhr", "fetch"}:
+            events.append(f"request:{describe(request)}")
+
+    def responded(response: Any) -> None:
+        if response.request.resource_type in {"document", "xhr", "fetch"}:
+            events.append(f"response:{describe(response.request)}:{int(response.status)}")
+
+    def failed(request: Any) -> None:
+        if request.resource_type in {"document", "xhr", "fetch"}:
+            events.append(f"requestfailed:{describe(request)}")
+
+    handlers = {"request": requested, "response": responded, "requestfailed": failed}
+    for event, handler in handlers.items():
+        page.on(event, handler)
+    try:
+        yield
+    except OpinetError:
+        raise
+    except Exception as exc:
+        # 원 예외 문자열은 인증 URL이나 요청 본문을 포함할 수 있으므로 복제하지 않는다.
+        raise OpinetServerError(
+            f"Opinet browser action failed: phase={phase}; cause={type(exc).__name__}; "
+            f"events={','.join(events) or 'none'}"
+        ) from None
+    finally:
+        for event, handler in handlers.items():
+            page.remove_listener(event, handler)
 
 
 def _freeze_raw_value(value: Any) -> Any:
@@ -857,11 +904,12 @@ class OpinetBrowserCollector:
             {"on", "active", "selected"}.intersection(class_name.split())
         )
         if not is_active:
-            async with page.expect_response(
-                lambda response: _is_post_response(response, _PAGE_ENDPOINT),
-                timeout=self.timeout_ms,
-            ) as response_info:
-                await locator.click(timeout=self.timeout_ms)
+            with _observe_browser_action(page, f"tab:{station_kind}"):
+                async with page.expect_response(
+                    lambda response: _is_post_response(response, _PAGE_ENDPOINT),
+                    timeout=self.timeout_ms,
+                ) as response_info:
+                    await locator.click(timeout=self.timeout_ms)
             response = await response_info.value
             _validate_response(response, _PAGE_ENDPOINT)
             await _reject_blocked_response(response, page=page, timeout_ms=self.timeout_ms)
@@ -973,11 +1021,14 @@ class OpinetBrowserCollector:
         if region_endpoints is None:
             await locator.select_option(value=value)
         else:
-            async with page.expect_response(
-                lambda response: any(_is_post_response(response, endpoint) for endpoint in region_endpoints),
-                timeout=self.timeout_ms,
-            ) as response_info:
-                await locator.select_option(value=value)
+            # 지역 코드만 진단에 포함한다. 임의 문자열·URL은 기록하지 않는다.
+            target = value if value.isascii() and value.isdecimal() and len(value) <= 10 else "non-numeric"
+            with _observe_browser_action(page, f"select:{selector}:target={target}"):
+                async with page.expect_response(
+                    lambda response: any(_is_post_response(response, endpoint) for endpoint in region_endpoints),
+                    timeout=self.timeout_ms,
+                ) as response_info:
+                    await locator.select_option(value=value)
             response = await response_info.value
             response_endpoint = _matching_endpoint(str(response.url), region_endpoints)
             if response_endpoint is None:
@@ -1118,12 +1169,15 @@ class OpinetBrowserCollector:
                 )
         await self._pause(page)
 
-        async with page.expect_response(
-            lambda response: _is_post_response(response, _SEARCH_ENDPOINT)
-            or _is_post_response(response, _PAGE_ENDPOINT),
-            timeout=self.timeout_ms,
-        ) as response_info:
-            await page.get_by_role("link", name="조회", exact=True).click(timeout=self.timeout_ms)
+        region_code = region.sigungu_value
+        target = region_code if region_code.isascii() and region_code.isdecimal() and len(region_code) <= 10 else "non-numeric"
+        with _observe_browser_action(page, f"search:{station_kind}:target={target}"):
+            async with page.expect_response(
+                lambda response: _is_post_response(response, _SEARCH_ENDPOINT)
+                or _is_post_response(response, _PAGE_ENDPOINT),
+                timeout=self.timeout_ms,
+            ) as response_info:
+                await page.get_by_role("link", name="조회", exact=True).click(timeout=self.timeout_ms)
         response = await response_info.value
         response_endpoint = _SEARCH_ENDPOINT if _has_endpoint(str(response.url), _SEARCH_ENDPOINT) else _PAGE_ENDPOINT
         _validate_response(response, response_endpoint)
