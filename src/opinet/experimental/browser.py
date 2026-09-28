@@ -225,7 +225,8 @@ def _observe_browser_action(page: Any, phase: str) -> Iterator[None]:
             events.append(f"response:{describe(response.request)}:{int(response.status)}")
 
     def failed(request: Any) -> None:
-        events.append(f"requestfailed:{describe(request)}")
+        if request.resource_type in {"document", "xhr", "fetch"}:
+            events.append(f"requestfailed:{describe(request)}")
 
     handlers = {"request": requested, "response": responded, "requestfailed": failed}
     for event, handler in handlers.items():
@@ -1020,7 +1021,9 @@ class OpinetBrowserCollector:
         if region_endpoints is None:
             await locator.select_option(value=value)
         else:
-            with _observe_browser_action(page, f"select:{selector}"):
+            # 지역 코드만 진단에 포함한다. 임의 문자열·URL은 기록하지 않는다.
+            target = value if value.isascii() and value.isdecimal() and len(value) <= 10 else "non-numeric"
+            with _observe_browser_action(page, f"select:{selector}:target={target}"):
                 async with page.expect_response(
                     lambda response: any(_is_post_response(response, endpoint) for endpoint in region_endpoints),
                     timeout=self.timeout_ms,
@@ -1166,7 +1169,9 @@ class OpinetBrowserCollector:
                 )
         await self._pause(page)
 
-        with _observe_browser_action(page, f"search:{station_kind}"):
+        region_code = region.sigungu_value
+        target = region_code if region_code.isascii() and region_code.isdecimal() and len(region_code) <= 10 else "non-numeric"
+        with _observe_browser_action(page, f"search:{station_kind}:target={target}"):
             async with page.expect_response(
                 lambda response: _is_post_response(response, _SEARCH_ENDPOINT)
                 or _is_post_response(response, _PAGE_ENDPOINT),

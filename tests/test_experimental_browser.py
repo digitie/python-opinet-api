@@ -492,6 +492,8 @@ def test_browser_action_failure_has_bounded_redacted_network_context(phase):
             request.resource_type = "image"
             handlers["request"](request)
             handlers["response"](SimpleNamespace(request=request, status=200))
+            for _ in range(12):
+                handlers["requestfailed"](request)
             raise TimeoutError("secret response body and certkey")
     message = str(raised.value)
     assert f"phase={phase}" in message
@@ -522,6 +524,18 @@ def test_browser_action_no_response_diagnostic():
     with pytest.raises(OpinetServerError, match="events=none"):
         with browser_module._observe_browser_action(_FakeEvents(), "tab:lpg"):
             raise TimeoutError()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("value,target", [("11680", "11680"), ("secret=value", "non-numeric")])
+async def test_selection_timeout_reports_only_numeric_region_target(value, target):
+    class NoResponsePage(_FakeRegionPage):
+        def expect_response(self, predicate, timeout):
+            raise TimeoutError("secret=value")
+
+    with pytest.raises(OpinetServerError, match=f"target={target}") as raised:
+        await OpinetBrowserCollector()._select_value(NoResponsePage(), "#SIGUNGU_NM0", value)
+    assert "secret=value" not in str(raised.value)
 
 
 class _FakeRegionPage(_FakeEvents):
