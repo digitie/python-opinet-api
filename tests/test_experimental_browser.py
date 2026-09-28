@@ -464,7 +464,67 @@ class _FakeLocator:
         self.clicked += 1
 
 
-class _FakeRegionPage:
+class _FakeEvents:
+    def on(self, event, handler):
+        pass
+
+    def remove_listener(self, event, handler):
+        pass
+
+
+@pytest.mark.parametrize("phase", ["tab:lpg", "select:#SIGUNGU_NM0", "search:station"])
+def test_browser_action_failure_has_bounded_redacted_network_context(phase):
+    handlers = {}
+    page = SimpleNamespace(on=handlers.__setitem__, remove_listener=lambda event, handler: handlers.pop(event))
+    request = SimpleNamespace(
+        url="https://www.opinet.co.kr/searRgSelect.do?certkey=secret",
+        method="GET", resource_type="document",
+    )
+    with pytest.raises(OpinetServerError) as raised:
+        with browser_module._observe_browser_action(page, phase):
+            for _ in range(20):
+                handlers["request"](request)
+            handlers["response"](SimpleNamespace(request=request, status=503))
+            handlers["requestfailed"](request)
+            request.url = "https://external.invalid/private-secret-path"
+            request.method = "DELETE"
+            handlers["request"](request)
+            request.resource_type = "image"
+            handlers["request"](request)
+            handlers["response"](SimpleNamespace(request=request, status=200))
+            raise TimeoutError("secret response body and certkey")
+    message = str(raised.value)
+    assert f"phase={phase}" in message
+    assert "cause=TimeoutError" in message
+    assert "response:GET:searRgSelect.do:503" in message
+    assert "requestfailed:GET:searRgSelect.do" in message
+    assert "request:other:other" in message
+    assert "secret" not in message
+    assert len(message.split("events=")[1].split(",")) == 8
+    assert not handlers
+
+
+@pytest.mark.parametrize("error", [
+    browser_module.OpinetAuthError("denied"), browser_module.OpinetRateLimitError("limited"),
+    asyncio.CancelledError(),
+])
+def test_browser_action_preserves_provider_errors_and_cancellation(error):
+    handlers = {}
+    page = SimpleNamespace(on=handlers.__setitem__, remove_listener=lambda event, handler: handlers.pop(event))
+    with pytest.raises(type(error)) as raised:
+        with browser_module._observe_browser_action(page, "search:lpg"):
+            raise error
+    assert raised.value is error
+    assert not handlers
+
+
+def test_browser_action_no_response_diagnostic():
+    with pytest.raises(OpinetServerError, match="events=none"):
+        with browser_module._observe_browser_action(_FakeEvents(), "tab:lpg"):
+            raise TimeoutError()
+
+
+class _FakeRegionPage(_FakeEvents):
     def __init__(self):
         self.current = {"#SIDO_NM0": "", "#SIGUNGU_NM0": "", "#DONG_NM": ""}
         self.locators = {}
@@ -580,6 +640,19 @@ class _FakeResponseContext:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("body", [
+    '<html><title>error.jsp</title><body>The service is not available.</body></html>',
+    '<html><body>THE SERVICE IS NOT AVAILABLE.</body></html>',
+])
+async def test_http_200_service_unavailable_is_not_a_search_page(body):
+    response = _FakeResponse(
+        "https://www.opinet.co.kr/searRgSelect.do", content_type="text/html", text_body=body,
+    )
+    with pytest.raises(OpinetServerError, match="service-unavailable"):
+        await browser_module._reject_blocked_response(response)
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("body,blocked", [("<html>지역 검색</html>", False), ("<html>CAPTCHA</html>", True)])
 async def test_lost_navigation_response_checks_current_document(body, blocked):
     class LostResponse(_FakeResponse):
@@ -639,7 +712,7 @@ async def test_unrelated_response_read_failure_is_not_hidden():
         await browser_module._reject_blocked_response(response, page=SimpleNamespace())
 
 
-class _FakeSearchPage:
+class _FakeSearchPage(_FakeEvents):
     def __init__(self, response, records=()):
         self.response = response
         self.records = records
@@ -768,7 +841,7 @@ async def test_browser_rejects_block_page_and_only_malformed_dom(region):
         await collector._read_dom_stations(page, region=region, station_kind="station")
 
 
-class _FakeTabPage:
+class _FakeTabPage(_FakeEvents):
     def __init__(self):
         self.tabs = {
             "#OS_BTN": _FakeLocator(attributes={"class": "on", "aria-selected": "true"}),
