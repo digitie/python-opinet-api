@@ -111,6 +111,45 @@ _BRAND_NAME_TO_CODE = {
 }
 
 
+_REGION_LABEL_MAX_CHARS = 12
+_REGION_SEARCH_MAX_ATTEMPTS = 2
+
+
+class _BrowserActionTimeoutError(OpinetServerError):
+    """브라우저 응답 대기 시간 초과. 지역 조회 1회 재시도 판단에만 사용한다."""
+
+
+def _region_label(value: str | None) -> str:
+    """진단 메시지에 남길 지역 식별자를 만든다.
+
+    숫자 지역 코드는 그대로 쓰고, 이름 값은 한글 음절과 숫자만 남겨 최대
+    ``_REGION_LABEL_MAX_CHARS``자로 자른다. URL·인증값 같은 임의 문자열은
+    남기지 않는다.
+    """
+    text = (value or "").strip()
+    if text.isascii() and text.isdecimal() and len(text) <= 10:
+        return text
+    kept = "".join(char for char in text if "\uac00" <= char <= "\ud7a3" or (char.isascii() and char.isdecimal()))
+    if not kept:
+        return "redacted"
+    if len(kept) > _REGION_LABEL_MAX_CHARS:
+        return kept[:_REGION_LABEL_MAX_CHARS] + "~"
+    return kept
+
+
+def _region_path_label(region: BrowserRegion) -> str:
+    """시도/시군구(/읍면동) 경로 형태의 진단용 지역 식별자를 반환한다."""
+    parts = [region.sido_value, region.sigungu_value]
+    if region.dong_value:
+        parts.append(region.dong_value)
+    return "/".join(_region_label(part) for part in parts)
+
+
+def _is_timeout(exc: BaseException) -> bool:
+    """Playwright·asyncio 응답 대기 시간 초과인지 판정한다."""
+    return isinstance(exc, (_BrowserActionTimeoutError, TimeoutError)) or type(exc).__name__ == "TimeoutError"
+
+
 def _is_allowed_opinet_url(value: str) -> bool:
     """오피넷 HTTPS 호스트인지 확인한다."""
     try:
@@ -237,7 +276,8 @@ def _observe_browser_action(page: Any, phase: str) -> Iterator[None]:
         raise
     except Exception as exc:
         # 원 예외 문자열은 인증 URL이나 요청 본문을 포함할 수 있으므로 복제하지 않는다.
-        raise OpinetServerError(
+        error_type = _BrowserActionTimeoutError if _is_timeout(exc) else OpinetServerError
+        raise error_type(
             f"Opinet browser action failed: phase={phase}; cause={type(exc).__name__}; "
             f"events={','.join(events) or 'none'}"
         ) from None
@@ -872,6 +912,8 @@ class OpinetBrowserCollector:
                 f"{search_request_count} > {self.throttle.max_search_requests}"
             )
         stations: dict[tuple[str, ...], BrowserStation] = {}
+        # 첫 조회분은 위에서 예약했다. 시간 초과 재시도는 남은 요청 상한에서 차감한다.
+        retry_budget = self.throttle.max_search_requests - search_request_count
 
         tab_targets: tuple[tuple[BrowserStationKind, str], ...] = (
             ("station", "#OS_BTN"),
@@ -880,11 +922,15 @@ class OpinetBrowserCollector:
         for station_kind, tab_selector in tab_targets:
             await self._activate_tab(page, station_kind=station_kind, selector=tab_selector)
             for region in query_regions:
-                for station in await self._search_region(
+                found, retried = await self._search_region_with_retry(
                     page,
                     region,
                     station_kind=station_kind,
-                ):
+                    retry_allowed=retry_budget > 0,
+                )
+                if retried:
+                    retry_budget -= 1
+                for station in found:
                     key = _station_key(station)
                     previous = stations.get(key)
                     stations[key] = station if previous is None else _merge_station(previous, station)
@@ -1011,7 +1057,7 @@ class OpinetBrowserCollector:
                     result.append((value, name))
         return tuple(result)
 
-    async def _select_value(self, page: Any, selector: str, value: str) -> None:
+    async def _select_value(self, page: Any, selector: str, value: str, *, parent: str | None = None) -> None:
         locator = page.locator(selector)
         current = await locator.input_value()
         if current == value:
@@ -1021,8 +1067,8 @@ class OpinetBrowserCollector:
         if region_endpoints is None:
             await locator.select_option(value=value)
         else:
-            # 지역 코드만 진단에 포함한다. 임의 문자열·URL은 기록하지 않는다.
-            target = value if value.isascii() and value.isdecimal() and len(value) <= 10 else "non-numeric"
+            # 숫자 지역 코드 또는 정제·절단한 지역 이름만 진단에 포함한다. 임의 문자열·URL은 기록하지 않는다.
+            target = _region_label(value) if parent is None else f"{_region_label(parent)}/{_region_label(value)}"
             with _observe_browser_action(page, f"select:{selector}:target={target}"):
                 async with page.expect_response(
                     lambda response: any(_is_post_response(response, endpoint) for endpoint in region_endpoints),
@@ -1060,7 +1106,7 @@ class OpinetBrowserCollector:
             if not sigungus:
                 raise OpinetServerError(f"Opinet browser returned no sigungu options for {sido_value!r}")
             for sigungu_value, sigungu_name in sigungus:
-                await self._select_value(page, "#SIGUNGU_NM0", sigungu_value)
+                await self._select_value(page, "#SIGUNGU_NM0", sigungu_value, parent=sido_value)
                 dongs = await self._read_options(page, "#DONG_NM")
                 if dongs:
                     regions.extend(
@@ -1146,15 +1192,45 @@ class OpinetBrowserCollector:
             raise OpinetServerError("Opinet browser returned only malformed station rows")
         return tuple(stations.values())
 
+    async def _search_region_with_retry(
+        self,
+        page: Any,
+        region: BrowserRegion,
+        *,
+        station_kind: BrowserStationKind,
+        retry_allowed: bool,
+    ) -> tuple[tuple[BrowserStation, ...], bool]:
+        """한 지역 조회가 시간 초과되면 같은 지역을 한 번만 다시 조회한다.
+
+        재시도는 응답 대기 시간 초과에만 적용한다. 인증 거부·429·차단 화면·파싱
+        오류는 즉시 전파한다. 재시도 전에도 화면 조작 간격(``_pause``)을 지키며,
+        반환값의 두 번째 요소는 재시도 요청을 썼는지 여부다(호출자가 요청 상한에서 차감).
+        """
+        try:
+            return await self._search_region(page, region, station_kind=station_kind), False
+        except Exception as exc:
+            if not _is_timeout(exc):
+                raise
+            if not retry_allowed:
+                raise _region_timeout_error(exc, region, station_kind, attempts=1, note="retry=budget-exhausted") from None
+        await self._pause(page)
+        try:
+            return await self._search_region(page, region, station_kind=station_kind, attempt=2), True
+        except Exception as exc:
+            if not _is_timeout(exc):
+                raise
+            raise _region_timeout_error(exc, region, station_kind, attempts=_REGION_SEARCH_MAX_ATTEMPTS) from None
+
     async def _search_region(
         self,
         page: Any,
         region: BrowserRegion,
         *,
         station_kind: BrowserStationKind,
+        attempt: int = 1,
     ) -> tuple[BrowserStation, ...]:
         await self._select_value(page, "#SIDO_NM0", region.sido_value)
-        await self._select_value(page, "#SIGUNGU_NM0", region.sigungu_value)
+        await self._select_value(page, "#SIGUNGU_NM0", region.sigungu_value, parent=region.sido_value)
         await self._select_value(page, "#DONG_NM", region.dong_value or "")
         for selector, expected in (
             ("#SIDO_NM0", region.sido_value),
@@ -1169,9 +1245,8 @@ class OpinetBrowserCollector:
                 )
         await self._pause(page)
 
-        region_code = region.sigungu_value
-        target = region_code if region_code.isascii() and region_code.isdecimal() and len(region_code) <= 10 else "non-numeric"
-        with _observe_browser_action(page, f"search:{station_kind}:target={target}"):
+        phase = f"search:{station_kind}:region={_region_path_label(region)}:attempt={attempt}"
+        with _observe_browser_action(page, phase):
             async with page.expect_response(
                 lambda response: _is_post_response(response, _SEARCH_ENDPOINT)
                 or _is_post_response(response, _PAGE_ENDPOINT),
@@ -1195,6 +1270,27 @@ class OpinetBrowserCollector:
             )
         await self._wait_for_results_dom(page)
         return await self._read_dom_stations(page, region=region, station_kind=station_kind)
+
+
+def _region_timeout_error(
+    exc: BaseException,
+    region: BrowserRegion,
+    station_kind: BrowserStationKind,
+    *,
+    attempts: int,
+    note: str | None = None,
+) -> OpinetServerError:
+    """지역 조회 시간 초과를 지역 식별자가 담긴 안전한 진단 오류로 만든다."""
+    suffix = f"; attempts={attempts}" + (f"; {note}" if note else "")
+    if isinstance(exc, OpinetServerError):
+        # 관찰 단계에서 이미 정제된 메시지(단계·지역·최근 이벤트)를 유지한다.
+        return type(exc)(f"{exc}{suffix}", status_code=exc.status_code, headers=exc.headers)
+    # 응답 이후 DOM 대기 등에서 난 원 예외 문자열은 복제하지 않는다.
+    return _BrowserActionTimeoutError(
+        "Opinet browser region search timed out: "
+        f"phase=search:{station_kind}:region={_region_path_label(region)}; "
+        f"cause={type(exc).__name__}{suffix}"
+    )
 
 
 __all__ = [
