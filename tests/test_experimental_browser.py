@@ -1143,6 +1143,7 @@ async def test_selection_timeout_reports_parent_region():
             NoResponsePage(), "#SIGUNGU_NM0", "용인시수지구", parent="경기도"
         )
     assert isinstance(raised.value, browser_module._BrowserActionTimeoutError)
+    assert not isinstance(raised.value, browser_module._SearchResponseTimeoutError)
 
 
 @pytest.mark.asyncio
@@ -1163,7 +1164,7 @@ async def test_search_timeout_phase_names_region_and_attempt(region):
     assert "cause=TimeoutError" in message
     assert "non-numeric" not in message
     assert "secret" not in message
-    assert isinstance(raised.value, browser_module._BrowserActionTimeoutError)
+    assert isinstance(raised.value, browser_module._SearchResponseTimeoutError)
 
 
 def _scripted_search_collector(monkeypatch, outcomes, *, max_search_requests=10_000):
@@ -1177,7 +1178,7 @@ def _scripted_search_collector(monkeypatch, outcomes, *, max_search_requests=10_
         query_level="sigungu",
     )
     calls = []
-    pauses = []
+    reloads = []
 
     async def search(_page, region, *, station_kind, attempt=1):
         calls.append((region.sigungu_value, station_kind, attempt))
@@ -1186,16 +1187,16 @@ def _scripted_search_collector(monkeypatch, outcomes, *, max_search_requests=10_
             raise outcome
         return outcome
 
-    async def pause(_page):
-        pauses.append(len(calls))
+    async def reload(_page, region, *, station_kind):
+        reloads.append((len(calls), region.sigungu_value, station_kind))
 
     monkeypatch.setattr(collector, "_search_region", search)
-    monkeypatch.setattr(collector, "_pause", pause)
-    return collector, calls, pauses
+    monkeypatch.setattr(collector, "_reload_search_page", reload)
+    return collector, calls, reloads
 
 
 def _wrapped_timeout(region_text="region=경기도/용인시수지구:attempt=1"):
-    return browser_module._BrowserActionTimeoutError(
+    return browser_module._SearchResponseTimeoutError(
         f"Opinet browser action failed: phase=search:station:{region_text}; cause=TimeoutError; events=none"
     )
 
@@ -1205,7 +1206,7 @@ async def test_region_search_timeout_is_retried_once_then_succeeds(monkeypatch, 
     station = parse_browser_response(
         {"list": [_row()]}, region=region, station_kind="station", query_level="sigungu"
     )[0]
-    collector, calls, pauses = _scripted_search_collector(monkeypatch, [_wrapped_timeout(), (station,)])
+    collector, calls, reloads = _scripted_search_collector(monkeypatch, [_wrapped_timeout(), (station,)])
 
     found, retried = await collector._search_region_with_retry(
         object(), region, station_kind="station", retry_allowed=True
@@ -1214,8 +1215,8 @@ async def test_region_search_timeout_is_retried_once_then_succeeds(monkeypatch, 
     assert found == (station,)
     assert retried is True
     assert calls == [("용인시수지구", "station", 1), ("용인시수지구", "station", 2)]
-    # 재시도 전에도 화면 조작 간격을 지킨다.
-    assert pauses == [1]
+    # 재시도 전에 화면을 다시 연다(첫 시도 뒤, 두 번째 시도 전).
+    assert reloads == [(1, "용인시수지구", "station")]
 
 
 @pytest.mark.asyncio
@@ -1241,32 +1242,120 @@ async def test_region_search_second_timeout_fails_with_region_and_attempts(monke
         OpinetAuthError("denied"),
         OpinetServerError("Opinet browser response appears to be an access-block page"),
         ValueError("parse"),
+        # 지역 선택 단계의 시간 초과도 재시도하지 않는다.
+        browser_module._BrowserActionTimeoutError("phase=select:#SIGUNGU_NM0:target=경기도/중구"),
     ],
 )
-async def test_region_search_non_timeout_errors_are_not_retried(monkeypatch, region, error):
-    collector, calls, pauses = _scripted_search_collector(monkeypatch, [error, ()])
+async def test_region_search_non_retryable_errors_are_not_retried(monkeypatch, region, error):
+    collector, calls, reloads = _scripted_search_collector(monkeypatch, [error, ()])
 
     with pytest.raises(type(error)) as raised:
         await collector._search_region_with_retry(object(), region, station_kind="station", retry_allowed=True)
 
     assert raised.value is error
     assert len(calls) == 1
-    assert pauses == []
+    assert reloads == []
 
 
 @pytest.mark.asyncio
-async def test_raw_dom_timeout_is_retried_and_reported_without_original_text(monkeypatch, region):
+async def test_raw_dom_timeout_is_not_retried_and_reported_without_original_text(monkeypatch, region):
+    """결과 DOM 대기 시간 초과는 차단·빈 화면일 수 있어 재시도하지 않고, 지역만 붙여 정제한다."""
     raw = TimeoutError("Timeout 60000ms exceeded waiting for certkey=secret")
-    collector, calls, _ = _scripted_search_collector(monkeypatch, [raw, TimeoutError("again certkey=secret")])
+    collector, calls, reloads = _scripted_search_collector(monkeypatch, [raw, ()])
 
     with pytest.raises(OpinetServerError) as raised:
         await collector._search_region_with_retry(object(), region, station_kind="lpg", retry_allowed=True)
 
     message = str(raised.value)
     assert "phase=search:lpg:region=경기도/용인시수지구/풍덕천동" in message
-    assert "attempts=2" in message
+    assert message.endswith("; attempts=1")
     assert "secret" not in message
-    assert len(calls) == 2
+    assert len(calls) == 1
+    assert reloads == []
+
+
+@pytest.mark.asyncio
+async def test_selection_stage_timeout_is_not_retried_on_the_real_path(region):
+    """지역 선택 응답이 오지 않으면 같은 화면에서 다시 고르지 않는다(늦은 응답·같은 이름 시군구 혼입 방지)."""
+
+    class NoSelectResponsePage(_FakeRegionPage):
+        def __init__(self):
+            super().__init__()
+            self.gotos = []
+
+        def expect_response(self, predicate, timeout):
+            raise TimeoutError("late dropdown response")
+
+        async def goto(self, url, **_kwargs):
+            self.gotos.append(url)
+            raise AssertionError("must not reload for a selection timeout")
+
+    collector = OpinetBrowserCollector(
+        throttle=OpinetBrowserThrottle(action_min_seconds=0.0, action_max_seconds=0.0),
+    )
+    page = NoSelectResponsePage()
+    with pytest.raises(browser_module._BrowserActionTimeoutError) as raised:
+        await collector._search_region_with_retry(page, region, station_kind="station", retry_allowed=True)
+
+    assert not isinstance(raised.value, browser_module._SearchResponseTimeoutError)
+    assert "phase=select:#SIDO_NM0:target=경기도" in str(raised.value)
+    assert page.gotos == []
+
+
+@pytest.mark.asyncio
+async def test_search_click_timeout_reloads_page_and_reselects_before_retry(region):
+    """조회 응답 시간 초과 뒤에는 화면을 새로 열고 탭·지역을 다시 고른 다음에만 다시 조회한다."""
+    region = replace(region, dong_value=None, dong_name=None)
+
+    class RetryPage(_FakeSearchPage):
+        def __init__(self):
+            super().__init__(_FakeResponse("https://www.opinet.co.kr/searRgCircleAjax.do", payload={"list": [_row()]}))
+            self.url = "https://www.opinet.co.kr/searRgSelect.do"
+            self.events = []
+            self.searches = 0
+            self.selectors["#OS_BTN"] = _FakeLocator(attributes={"class": "on", "aria-selected": "true"})
+            self.set_region(region)
+
+        def expect_response(self, predicate, timeout):
+            self.searches += 1
+            self.events.append(f"search{self.searches}")
+            if self.searches == 1:
+                raise TimeoutError("first search response never arrived")
+            return _FakeResponseContext(self.response)
+
+        async def goto(self, url, *, wait_until, timeout):
+            assert wait_until == "domcontentloaded" and timeout > 0
+            self.events.append("goto")
+            # 새 화면은 선택값이 비어 있다. 재시도는 이를 다시 골라야 한다.
+            for selector in ("#SIDO_NM0", "#SIGUNGU_NM0", "#DONG_NM"):
+                self.selectors[selector] = _FakeLocator(current="")
+            return _FakeResponse(url, content_type="text/html", text_body="<html>지역 검색</html>")
+
+    selected = []
+    collector = OpinetBrowserCollector(
+        throttle=OpinetBrowserThrottle(action_min_seconds=0.0, action_max_seconds=0.0),
+    )
+    page = RetryPage()
+
+    async def select(page_, selector, value, *, parent=None):
+        selected.append((page_.events[-1] if page_.events else "start", selector, value))
+        page_.selectors[selector] = _FakeLocator(current=value)
+
+    collector._select_value = select
+
+    found, retried = await collector._search_region_with_retry(
+        page, region, station_kind="station", retry_allowed=True
+    )
+
+    assert retried is True
+    assert len(found) == 1
+    assert page.events == ["search1", "goto", "search2"]
+    # 두 번째 조회 전의 지역 선택은 새로 연 화면(goto 뒤)에서 다시 이뤄진다.
+    assert [item for item in selected if item[0] == "goto"] == [
+        ("goto", "#SIDO_NM0", "경기도"),
+        ("goto", "#SIGUNGU_NM0", "용인시수지구"),
+        ("goto", "#DONG_NM", ""),
+    ]
 
 
 @pytest.mark.asyncio
@@ -1318,3 +1407,4 @@ async def test_region_retry_within_budget_completes_collection(monkeypatch, regi
     assert [attempt for *_, attempt in calls] == [1, 2, 1, 2]
     assert [kind for _, kind, _ in calls] == ["station", "station", "lpg", "lpg"]
     assert len(snapshot.stations) == 1
+    assert snapshot.region_retry_count == 2
