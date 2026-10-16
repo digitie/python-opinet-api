@@ -15,12 +15,13 @@ import random
 import time
 from collections import deque
 from collections.abc import Awaitable, Callable, Mapping, Sequence
-from contextlib import contextmanager
+from contextlib import asynccontextmanager, contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta
 from types import MappingProxyType
 from typing import Any, Literal, TypeAlias
-from typing import Iterator
+from typing import AsyncIterator, Iterator
 from urllib.parse import urlsplit
 from zoneinfo import ZoneInfo
 
@@ -113,6 +114,12 @@ _BRAND_NAME_TO_CODE = {
 
 
 _logger = logging.getLogger(__name__)
+
+_METRIC_PHASES = ("navigation", "discovery", "search", "wait", "parse", "close")
+_RESOURCE_TYPES = frozenset({"document", "script", "stylesheet", "image", "font", "media", "xhr", "fetch"})
+_VISUAL_RESOURCES = frozenset({"image", "font", "media"})
+_metrics_state: ContextVar[tuple[object, dict[str, int]] | None] = ContextVar("opinet_browser_metrics", default=None)
+_observed_page: ContextVar[tuple[object, object] | None] = ContextVar("opinet_browser_observed_page", default=None)
 
 _REGION_LABEL_MAX_CHARS = 12
 _REGION_SEARCH_MAX_ATTEMPTS = 2
@@ -858,6 +865,10 @@ class OpinetBrowserCollector:
     기본 User-Agent를 사용하며, PC 브라우저로 위장하기 위한 패치나 stealth
     플러그인은 적용하지 않는다. 부하 분산을 위해 화면 조작 사이에는 짧은
     무작위 대기, 전체 수집 사이에는 기본 8시간의 대기를 사용한다.
+
+    block_visual_resources는 기본 False이며 image/font/media 요청만 선택적으로
+    차단한다. route는 HTTP cache를 끌 수 있으므로 실제 동등성 검증 후 선택한다.
+    on_metrics는 선택적 동기 callback으로 고정 키의 읽기 전용 정수 요약만 받는다.
     """
 
     def __init__(
@@ -870,6 +881,8 @@ class OpinetBrowserCollector:
         query_level: BrowserQueryLevel = "sigungu",
         throttle: OpinetBrowserThrottle | None = None,
         rng: random.Random | None = None,
+        block_visual_resources: bool = False,
+        on_metrics: Callable[[Mapping[str, int]], None] | None = None,
     ) -> None:
         if not _is_allowed_opinet_url(url):
             raise ValueError("url must be an HTTPS Opinet URL")
@@ -877,6 +890,12 @@ class OpinetBrowserCollector:
             raise ValueError("timeout_ms must be positive")
         if query_level not in ("sigungu", "dong"):
             raise ValueError("query_level must be 'sigungu' or 'dong'")
+        if type(block_visual_resources) is not bool:
+            raise ValueError("block_visual_resources must be a bool")
+        if on_metrics is not None and not callable(on_metrics):
+            raise ValueError("on_metrics must be callable")
+        self.block_visual_resources = block_visual_resources
+        self.on_metrics = on_metrics
         self.url = url
         self.headless = headless
         self.browser_channel = browser_channel
@@ -885,84 +904,195 @@ class OpinetBrowserCollector:
         self.throttle = throttle or OpinetBrowserThrottle()
         self.rng = rng or random.Random()
 
+    def _metrics(self) -> dict[str, int] | None:
+        """현재 호출 소유자의 고정 크기 계수만 반환한다."""
+        state = _metrics_state.get()
+        return state[1] if state is not None and state[0] is self else None
+
+    @contextmanager
+    def _metric_session(self) -> Iterator[None]:
+        """중첩 collect_page는 같은 계수를 쓰고 독립 호출은 서로 격리한다."""
+        if self.on_metrics is None or self._metrics() is not None:
+            yield
+            return
+        values = {f"{phase}_{suffix}": 0 for phase in _METRIC_PHASES for suffix in ("elapsed_us", "count")}
+        values.update({f"{kind}_requests": 0 for kind in (*sorted(_RESOURCE_TYPES), "other")})
+        values.update(dict.fromkeys(("request_count", "request_failed_count", "blocked_resource_count",
+                                     "regions", "query_regions", "stations", "region_retries",
+                                     "success", "failed", "cancelled", "total_elapsed_us"), 0))
+        token = _metrics_state.set((self, values))
+        started = time.perf_counter_ns()
+        try:
+            yield
+        except asyncio.CancelledError:
+            values["cancelled"] = 1
+            raise
+        except BaseException:
+            values["failed"] = 1
+            raise
+        else:
+            values["success"] = 1
+        finally:
+            values["total_elapsed_us"] = max(0, (time.perf_counter_ns() - started) // 1000)
+            _metrics_state.reset(token)
+            try:
+                self.on_metrics(MappingProxyType(dict(values)))
+            except Exception:
+                # 진단 callback의 예외·원문이 수집 결과나 본래 실패를 바꾸지 않는다.
+                _logger.warning("Opinet browser metrics callback failed")
+
+    @contextmanager
+    def _measure(self, phase: str) -> Iterator[None]:
+        """단계의 실제 경과 마이크로초를 정수로 누적한다. 중첩 단계는 겹칠 수 있다."""
+        values = self._metrics()
+        if values is None:
+            yield
+            return
+        assert phase in _METRIC_PHASES
+        started = time.perf_counter_ns()
+        try:
+            yield
+        finally:
+            values[phase + "_count"] += 1
+            values[phase + "_elapsed_us"] += max(0, (time.perf_counter_ns() - started) // 1000)
+
+    @asynccontextmanager
+    async def _page_scope(self, page: Any) -> AsyncIterator[None]:
+        """선택한 자원만 차단하고 기존 route·호출자 페이지의 소유권을 보존한다."""
+        values = self._metrics()
+        observed = _observed_page.get()
+        if (observed is not None and observed[0] is self and observed[1] is page) or (values is None and not self.block_visual_resources):
+            yield
+            return
+        token = _observed_page.set((self, page))
+        installed = False
+
+        def requested(request: Any) -> None:
+            if values is not None:
+                kind = request.resource_type if request.resource_type in _RESOURCE_TYPES else "other"
+                values["request_count"] += 1
+                values[kind + "_requests"] += 1
+
+        def failed(request: Any) -> None:
+            if values is not None:
+                values["request_failed_count"] += 1
+
+        async def route_visual(route: Any) -> None:
+            if route.request.resource_type in _VISUAL_RESOURCES:
+                await route.abort()
+                if values is not None:
+                    values["blocked_resource_count"] += 1
+            else:
+                # 호출자가 이미 설치한 fixture/정책을 우회하지 않는다.
+                await route.fallback()
+
+        if values is not None:
+            page.on("request", requested)
+            page.on("requestfailed", failed)
+        try:
+            if self.block_visual_resources:
+                await page.route("**/*", route_visual)
+                installed = True
+            yield
+        finally:
+            try:
+                if installed:
+                    await page.unroute("**/*", route_visual)
+            finally:
+                if values is not None:
+                    page.remove_listener("request", requested)
+                    page.remove_listener("requestfailed", failed)
+                _observed_page.reset(token)
+
     async def collect_once(self) -> OpinetBrowserSnapshot:
         """새 Chromium 컨텍스트로 한 번 전체 지역 수집을 실행한다."""
-        async_playwright = _load_playwright()
-        async with async_playwright() as playwright:
-            launch_options: dict[str, Any] = {"headless": self.headless}
-            if self.browser_channel is not None:
-                launch_options["channel"] = self.browser_channel
-            browser = None
-            context = None
-            try:
-                browser = await playwright.chromium.launch(**launch_options)
-                context = await browser.new_context()
-                page = await context.new_page()
-                await self._open_search_page(page)
-                await self._pause(page)
-                return await self.collect_page(page)
-            finally:
-                if context is not None:
-                    try:
-                        await context.close()
-                    finally:
-                        if browser is not None:
+        with self._metric_session():
+            async_playwright = _load_playwright()
+            async with async_playwright() as playwright:
+                launch_options: dict[str, Any] = {"headless": self.headless}
+                if self.browser_channel is not None:
+                    launch_options["channel"] = self.browser_channel
+                browser = None
+                context = None
+                try:
+                    browser = await playwright.chromium.launch(**launch_options)
+                    context = await browser.new_context()
+                    page = await context.new_page()
+                    async with self._page_scope(page):
+                        await self._open_search_page(page)
+                        await self._pause(page)
+                        return await self.collect_page(page)
+                finally:
+                    with self._measure("close"):
+                        if context is not None:
+                            try:
+                                await context.close()
+                            finally:
+                                if browser is not None:
+                                    await browser.close()
+                        elif browser is not None:
                             await browser.close()
-                elif browser is not None:
-                    await browser.close()
 
     async def _open_search_page(self, page: Any) -> None:
         """검색 화면을 새로 열고 응답 출처·차단 여부·최종 주소를 검증한다."""
-        navigation_response = await page.goto(self.url, wait_until="domcontentloaded", timeout=self.timeout_ms)
-        if navigation_response is None:
-            raise OpinetServerError("Opinet browser navigation returned no response")
-        _validate_response(navigation_response, _PAGE_ENDPOINT)
-        await _reject_blocked_response(navigation_response, page=page, timeout_ms=self.timeout_ms)
-        final_url = str(getattr(page, "url", self.url))
-        if not _is_allowed_opinet_url(final_url):
-            raise OpinetServerError(f"Opinet browser navigation redirected to {final_url!r}")
+        with self._measure("navigation"):
+            navigation_response = await page.goto(self.url, wait_until="domcontentloaded", timeout=self.timeout_ms)
+            if navigation_response is None:
+                raise OpinetServerError("Opinet browser navigation returned no response")
+            _validate_response(navigation_response, _PAGE_ENDPOINT)
+            await _reject_blocked_response(navigation_response, page=page, timeout_ms=self.timeout_ms)
+            final_url = str(getattr(page, "url", self.url))
+            if not _is_allowed_opinet_url(final_url):
+                raise OpinetServerError(f"Opinet browser navigation redirected to {final_url!r}")
 
     async def collect_page(self, page: Any) -> OpinetBrowserSnapshot:
         """이미 열린 Playwright 페이지에서 한 번 전체 지역 수집을 실행한다."""
-        regions = await self._discover_regions(page)
-        query_regions = self._query_regions(regions)
-        if not query_regions:
-            raise OpinetServerError("Opinet browser returned no queryable regions")
-        search_request_count = len(query_regions) * 2
-        if search_request_count > self.throttle.max_search_requests:
-            raise OpinetServerError(
-                "Opinet browser search request budget exceeded: "
-                f"{search_request_count} > {self.throttle.max_search_requests}"
-            )
-        stations: dict[tuple[str, ...], BrowserStation] = {}
-        # 첫 조회분은 위에서 예약했다. 시간 초과 재시도는 남은 요청 상한에서 차감한다.
-        retry_budget = self.throttle.max_search_requests - search_request_count
+        with self._metric_session():
+            async with self._page_scope(page):
+                with self._measure("discovery"):
+                    regions = await self._discover_regions(page)
+                query_regions = self._query_regions(regions)
+                if not query_regions:
+                    raise OpinetServerError("Opinet browser returned no queryable regions")
+                search_request_count = len(query_regions) * 2
+                if search_request_count > self.throttle.max_search_requests:
+                    raise OpinetServerError(
+                        "Opinet browser search request budget exceeded: "
+                        f"{search_request_count} > {self.throttle.max_search_requests}"
+                    )
+                stations: dict[tuple[str, ...], BrowserStation] = {}
+                # 첫 조회분은 위에서 예약했다. 시간 초과 재시도는 남은 요청 상한에서 차감한다.
+                retry_budget = self.throttle.max_search_requests - search_request_count
 
-        retried = 0
-        for station_kind, tab_selector in _TAB_SELECTORS.items():
-            await self._activate_tab(page, station_kind=station_kind, selector=tab_selector)
-            for region in query_regions:
-                found, region_retried = await self._search_region_with_retry(
-                    page,
-                    region,
-                    station_kind=station_kind,
-                    retry_allowed=retry_budget > 0,
+                retried = 0
+                for station_kind, tab_selector in _TAB_SELECTORS.items():
+                    await self._activate_tab(page, station_kind=station_kind, selector=tab_selector)
+                    for region in query_regions:
+                        with self._measure("search"):
+                            found, region_retried = await self._search_region_with_retry(
+                                page,
+                                region,
+                                station_kind=station_kind,
+                                retry_allowed=retry_budget > 0,
+                            )
+                        if region_retried:
+                            retry_budget -= 1
+                            retried += 1
+                        for station in found:
+                            key = _station_key(station)
+                            previous = stations.get(key)
+                            stations[key] = station if previous is None else _merge_station(previous, station)
+
+                values = self._metrics()
+                if values is not None:
+                    values.update(regions=len(regions), query_regions=len(query_regions), stations=len(stations), region_retries=retried)
+                return OpinetBrowserSnapshot(
+                    collected_at=datetime.now(_SEOUL),
+                    source_url=self.url,
+                    regions=tuple(regions),
+                    stations=tuple(stations.values()),
+                    region_retry_count=retried,
                 )
-                if region_retried:
-                    retry_budget -= 1
-                    retried += 1
-                for station in found:
-                    key = _station_key(station)
-                    previous = stations.get(key)
-                    stations[key] = station if previous is None else _merge_station(previous, station)
-
-        return OpinetBrowserSnapshot(
-            collected_at=datetime.now(_SEOUL),
-            source_url=self.url,
-            regions=tuple(regions),
-            stations=tuple(stations.values()),
-            region_retry_count=retried,
-        )
 
     async def _activate_tab(self, page: Any, *, station_kind: BrowserStationKind, selector: str) -> None:
         locator = page.locator(selector)
@@ -1045,9 +1175,10 @@ class OpinetBrowserCollector:
                 await on_error(exc)
 
     async def _pause(self, page: Any) -> None:
-        delay_ms = round(self.throttle.sample_action_delay(self.rng) * 1000)
-        if delay_ms > 0:
-            await page.wait_for_timeout(delay_ms)
+        with self._measure("wait"):
+            delay_ms = round(self.throttle.sample_action_delay(self.rng) * 1000)
+            if delay_ms > 0:
+                await page.wait_for_timeout(delay_ms)
 
     async def _wait_or_stop(self, delay: timedelta, stop_event: asyncio.Event | None) -> bool:
         if stop_event is None:
@@ -1297,19 +1428,20 @@ class OpinetBrowserCollector:
         response_endpoint = _SEARCH_ENDPOINT if _has_endpoint(str(response.url), _SEARCH_ENDPOINT) else _PAGE_ENDPOINT
         _validate_response(response, response_endpoint)
         await _reject_blocked_response(response, page=page, timeout_ms=self.timeout_ms)
-        content_type = (await response.header_value("content-type") or "").lower()
-        if response_endpoint == _SEARCH_ENDPOINT or "json" in content_type:
-            payload = await response.json()
-            if not isinstance(payload, Mapping):
-                raise OpinetServerError(f"{_SEARCH_ENDPOINT}: response must be a JSON object")
-            return parse_browser_response(
-                payload,
-                region=region,
-                station_kind=station_kind,
-                query_level=self.query_level,
-            )
-        await self._wait_for_results_dom(page)
-        return await self._read_dom_stations(page, region=region, station_kind=station_kind)
+        with self._measure("parse"):
+            content_type = (await response.header_value("content-type") or "").lower()
+            if response_endpoint == _SEARCH_ENDPOINT or "json" in content_type:
+                payload = await response.json()
+                if not isinstance(payload, Mapping):
+                    raise OpinetServerError(f"{_SEARCH_ENDPOINT}: response must be a JSON object")
+                return parse_browser_response(
+                    payload,
+                    region=region,
+                    station_kind=station_kind,
+                    query_level=self.query_level,
+                )
+            await self._wait_for_results_dom(page)
+            return await self._read_dom_stations(page, region=region, station_kind=station_kind)
 
 
 def _region_timeout_error(

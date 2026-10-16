@@ -173,3 +173,38 @@ asyncio.run(main())
 - 공식 API나 사전 협의된 데이터 제공 경로가 있으면 화면 수집보다 우선한다.
 - 수집한 전화번호·사업자번호 등 공개 사업자 정보도 필요한 범위에서만 저장하고
   로그에 원문을 남기지 않는다.
+
+
+## 부수 자원 비용의 선택적 비교
+
+기본 block_visual_resources=False는 route를 설치하지 않는다. True를 명시하면
+현재 페이지의 image/font/media 요청만 abort한다. document/script/stylesheet/XHR/fetch
+및 알 수 없는 종류는 기존 route로 fallback한다. service worker 정책·탭·지역 선택·
+파서/raw/좌표/가격·재시도/검색 상한/pacing은 바꾸지 않는다.
+collect_once는 첫 navigation부터, collect_page(page)는 호출 이후 요청에만 적용한다.
+이미 로드된 자원은 되돌리지 않는다. 실패·취소 시 자기 handler만 제거하며
+호출자 페이지나 기존 route를 닫거나 지우지 않는다.
+
+**운영 개선은 아직 검증하지 않았다.** Playwright 공식
+[route 계약](https://playwright.dev/python/docs/api/class-browsercontext#browser-context-route)은
+routing 활성화가 HTTP cache를 끈다고 명시한다. 반복 navigation의 JS/CSS 요청은
+늘 수 있고 service worker가 처리한 요청은 route를 통과하지 않을 수 있다.
+CAPTCHA/접근 거부/401·403·429는 종전처럼 실패한다. 같은 입력에서 실제 출력·
+서버 요청 수/CPU/메모리/wall을 검증하기 전 기본값을 바꾸거나 소비자에서 켜지 않는다.
+
+on_metrics=callback은 별도 선택이며 실행당 한 번 읽기 전용 Mapping[str, int]를 받는다.
+고정 키32개이며 URL·헤더·본문·지역·주유소·인증값은 없다. callback 일반 예외는
+정제된 경고만 남기며 수집 결과나 원래 실패를 바꾸지 않는다. 동기 함수로 짧게 실행한다.
+
+- navigation/discovery/search/wait/parse/close_elapsed_us와 같은 접두사의 count:
+  실제 경과 마이크로초·호출 수. wait는 의도적 pacing 대기이며 응답/DOM 대기는
+  discovery/search에 포함된다. 중첩 단계 시간을 합쳐 전체 CPU로 설명하지 않는다.
+- total_elapsed_us, success/failed/cancelled: 전체 경과와 종료 상태. collect_once는
+  Playwright 시작/종료와 context/browser cleanup을 포함하며 Chromium CPU/RSS는 아니다.
+- request_count/request_failed_count, 종류별 requests, blocked_resource_count:
+  브라우저의 요청 시도/실패/차단 수. cache/SW 때문에 서버 전송 수와 다를 수 있다.
+- regions/query_regions/stations/region_retries: 완료 snapshot의 개수.
+  도중 실패한 호출에서 완료 개수를 추정하지 않는다.
+
+계측만 켜면 route/cache 정책은 바뀌지 않는다. 과거 run별 내역을 collector에 쌓지 않으며
+ContextVar로 동시 호출을 격리한다. 생산 CPU/RSS 감소나 누수 해결을 주장하지 않는다.
