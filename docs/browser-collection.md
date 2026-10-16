@@ -208,3 +208,42 @@ on_metrics=callback은 별도 선택이며 실행당 한 번 읽기 전용 Mappi
 
 계측만 켜면 route/cache 정책은 바뀌지 않는다. 과거 run별 내역을 collector에 쌓지 않으며
 ContextVar로 동시 호출을 격리한다. 생산 CPU/RSS 감소나 누수 해결을 주장하지 않는다.
+
+
+### 로컬 Chromium 비교와 재현
+
+의존성 browser/dev와 Playwright bundled Chromium을 준비한 환경에서 아래 검증을 실행한다.
+기본 unit suite는 Playwright 미설치 시 실제 브라우저 fixture를 건너뛴다. 설치했으나
+브라우저 binary가 없으면 설치/환경 실패를 숨기지 않고 실패한다. 실제 Opinet에는 접속하지 않는다.
+
+    python -m pytest tests/test_browser_resource_fixture.py -q
+    python tests/benchmark_browser_resources.py --output 비교결과.json
+
+테스트 전용 loopback origin만 허용하는 fixture로 1지역·주유소/LPG 2탭을 읽었다.
+세 쌍 각각 다른 Python 프로세스를 사용하고 실행 순서를 off/on, on/off, off/on으로 바꿨다.
+수집 시각·임시 origin을 제외한 모든 typed/raw 출력 digest는 여섯 번 모두 같았다.
+숫자·가격·좌표 원문, unknown raw 필드, 두 업종 병합, 지역 선택은 보존됐다.
+서버가 받은 검색 POST2회/탭 POST1회/문서 GET1회도 동일했다.
+별도 실제 fixture는 401/403/429와 HTTP200 CAPTCHA를 추가 검색 없이 실패시켰다.
+
+2026-10-16 Linux x86_64/Python3.12.13/Playwright1.63.0의 단기 fixture 측정이다.
+각 칸은 자원 정책 기본 / 차단이며, 양쪽 모두 on_metrics를 켰다. ms와 MiB 단위를 쓴다.
+
+| 쌍 | wall ms | Python+회수 하위 CPU ms | 표본 RSS 합 MiB | 표본 PSS 합 MiB |
+| --- | --- | --- | --- | --- |
+| 1 | 815.05 / 810.35 | 1017.84 / 1029.65 | 758.57 / 679.16 | 453.59 / 429.33 |
+| 2 | 807.48 / 824.36 | 973.47 / 1004.70 | 758.04 / 683.07 | 453.37 / 459.56 |
+| 3 | 824.21 / 820.96 | 990.86 / 985.49 | 762.98 / 678.09 | 456.38 / 429.48 |
+
+서버 총 요청은 기본9회/차단10회였다. image/font/media 전송3회는 없어졌지만
+JS/CSS 각각1회가3회로 증가했다. 요청 시도/차단 계수와 서버 전송 수를 혼용하지 않는다.
+wall은 Playwright 시작과 cleanup을 포함한다. Python CPU에는 자기 fixture 서버와
+50ms 메모리 sampler가 포함되며 하위 CPU는 종료 후 회수한 누계다.
+RSS는 공유 페이지를 중복 합산한다. PSS도 50ms 표본이므로 실제 peak 상한이 아니며
+두 메모리 수치의 peak 시점이 다를 수 있다. sampler와 서버는 이 비교용 도구에만 있다.
+
+CPU·wall 개선은 입증되지 않았고 메모리 표본만으로 운영 개선을 주장하지 않는다.
+짧은 단일 fixture·세 쌍·통제되지 않은 호스트 cache/부하이며 장시간·ARM·실제 provider
+지역 수와 자원 정책은 검증하지 않았다. 특히 cache 재전송 비용 때문에 실제 수집에서
+오히려 느려질 수 있다. 운영 출력·요청량·CPU/PSS/wall 비교와 두 독립 리뷰 전에는
+소비자 pin/옵션을 바꾸지 않는다. Transport의 scraper 재구현이나 현재 fuel 중단은 없다.

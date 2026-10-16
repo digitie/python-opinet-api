@@ -329,3 +329,14 @@ VWorld 연동은 비동기 search_district를 사용하며 완료된 지역 코�
 
 
 예제는 [docs/async-tps.md](../docs/async-tps.md)를 참고한다.
+
+
+## 브라우저 부수 자원 선택과 계측
+
+실험 collector에 기본 off인 block_visual_resources와 독립 on_metrics를 추가했다.
+공식 HTTP API·provider 출력/raw·지역/두 탭·재시도/quota/pacing은 유지한다.
+고정32 정수 키만 보고하고 URL·원문·식별자를 계측에 넣지 않는다.
+실제 loopback Chromium 출력/실패 회귀 및 세 쌍 비용 비교는
+[browser-collection.md](browser-collection.md#로컬-chromium-비교와-재현)에 기록했다.
+route의 cache 비활성화로 서버 요청이 증가했고 CPU·wall 개선은 입증되지 않았다.
+운영 적용/소비자 pin 변경은 아직 하지 않았다.

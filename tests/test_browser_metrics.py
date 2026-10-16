@@ -163,3 +163,37 @@ def test_other_collectors_do_not_steal_parent_metrics():
             b._metrics()["stations"] = 3
         assert a._metrics()["stations"] == 7
     assert first[0]["stations"] == 7 and second[0]["stations"] == 3
+
+
+async def test_real_task_cancellation_cleans_only_own_handlers():
+    reports = []
+    collector = OpinetBrowserCollector(block_visual_resources=True, on_metrics=reports.append)
+    page = Page()
+    entered = asyncio.Event()
+    async def collect():
+        with collector._metric_session():
+            async with collector._page_scope(page):
+                entered.set()
+                await asyncio.Event().wait()
+    task = asyncio.create_task(collect())
+    await asyncio.wait_for(entered.wait(), 1)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert page.routes == [] and all(not v for v in page.events.values())
+    assert reports[0]["cancelled"] == 1 and reports[0]["success"] == 0
+
+
+async def test_other_collector_same_page_keeps_its_own_resource_policy():
+    a = OpinetBrowserCollector(on_metrics=lambda report: None)
+    b = OpinetBrowserCollector(block_visual_resources=True)
+    page = Page()
+    with a._metric_session():
+        async with a._page_scope(page):
+            assert not page.routes
+            async with b._page_scope(page):
+                route = Route("image")
+                await page.routes[0][1](route)
+                assert route.action == "abort"
+            assert not page.routes and len(page.events["request"]) == 1
+    assert all(not v for v in page.events.values())
