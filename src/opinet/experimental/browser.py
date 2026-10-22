@@ -923,9 +923,21 @@ class OpinetBrowserCollector:
             raise OpinetServerError(f"Opinet browser navigation redirected to {final_url!r}")
 
     async def collect_page(self, page: Any) -> OpinetBrowserSnapshot:
-        """이미 열린 Playwright 페이지에서 한 번 전체 지역 수집을 실행한다."""
+        """이미 열린 Playwright 페이지에서 한 번 전체 지역 수집을 실행한다.
+
+        단계별 진행(지역 탐색 완료, 탭 시작·끝, 탭 안의 시도 단위 진행)과 경과 시간을 ``INFO`` 로그로
+        남긴다. 전체 수집이 수십 분~수 시간 걸리므로 호출자가 어디서 시간이 드는지 볼 수 있게 한다.
+        """
+        started = time.monotonic()
+        _logger.info("Opinet browser collection started: query_level=%s", self.query_level)
         regions = await self._discover_regions(page)
         query_regions = self._query_regions(regions)
+        _logger.info(
+            "Opinet browser region discovery finished: regions=%d query_regions=%d elapsed=%.0fs",
+            len(regions),
+            len(query_regions),
+            time.monotonic() - started,
+        )
         if not query_regions:
             raise OpinetServerError("Opinet browser returned no queryable regions")
         search_request_count = len(query_regions) * 2
@@ -939,9 +951,17 @@ class OpinetBrowserCollector:
         retry_budget = self.throttle.max_search_requests - search_request_count
 
         retried = 0
+        total = len(query_regions)
         for station_kind, tab_selector in _TAB_SELECTORS.items():
+            tab_started = time.monotonic()
+            _logger.info(
+                "Opinet browser tab started: kind=%s query_regions=%d elapsed=%.0fs",
+                station_kind,
+                total,
+                tab_started - started,
+            )
             await self._activate_tab(page, station_kind=station_kind, selector=tab_selector)
-            for region in query_regions:
+            for index, region in enumerate(query_regions, start=1):
                 found, region_retried = await self._search_region_with_retry(
                     page,
                     region,
@@ -955,7 +975,35 @@ class OpinetBrowserCollector:
                     key = _station_key(station)
                     previous = stations.get(key)
                     stations[key] = station if previous is None else _merge_station(previous, station)
+                if index == total or query_regions[index].sido_value != region.sido_value:
+                    _logger.info(
+                        "Opinet browser tab progress: kind=%s sido=%s done=%d/%d stations=%d retries=%d "
+                        "tab_elapsed=%.0fs elapsed=%.0fs",
+                        station_kind,
+                        _region_label(region.sido_value),
+                        index,
+                        total,
+                        len(stations),
+                        retried,
+                        time.monotonic() - tab_started,
+                        time.monotonic() - started,
+                    )
+            _logger.info(
+                "Opinet browser tab finished: kind=%s query_regions=%d stations=%d tab_elapsed=%.0fs elapsed=%.0fs",
+                station_kind,
+                total,
+                len(stations),
+                time.monotonic() - tab_started,
+                time.monotonic() - started,
+            )
 
+        _logger.info(
+            "Opinet browser collection finished: regions=%d stations=%d retries=%d elapsed=%.0fs",
+            len(regions),
+            len(stations),
+            retried,
+            time.monotonic() - started,
+        )
         return OpinetBrowserSnapshot(
             collected_at=datetime.now(_SEOUL),
             source_url=self.url,
@@ -1118,11 +1166,12 @@ class OpinetBrowserCollector:
 
     async def _discover_regions(self, page: Any) -> list[BrowserRegion]:
         regions: list[BrowserRegion] = []
+        started = time.monotonic()
         await self._wait_for_options(page, "#SIDO_NM0")
         sidos = await self._read_options(page, "#SIDO_NM0")
         if not sidos:
             raise OpinetServerError("Opinet browser returned no sido options")
-        for sido_value, sido_name in sidos:
+        for sido_index, (sido_value, sido_name) in enumerate(sidos, start=1):
             await self._select_value(page, "#SIDO_NM0", sido_value)
             sigungus = await self._read_options(page, "#SIGUNGU_NM0")
             if not sigungus:
@@ -1151,6 +1200,15 @@ class OpinetBrowserCollector:
                             sigungu_name=sigungu_name,
                         )
                     )
+            _logger.info(
+                "Opinet browser region discovery progress: sido=%s done=%d/%d sigungu=%d regions=%d elapsed=%.0fs",
+                _region_label(sido_value),
+                sido_index,
+                len(sidos),
+                len(sigungus),
+                len(regions),
+                time.monotonic() - started,
+            )
         return regions
 
     def _query_regions(self, regions: Sequence[BrowserRegion]) -> tuple[BrowserRegion, ...]:

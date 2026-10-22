@@ -28,6 +28,10 @@ OpinetClient를 native async 하나로 통합했다. 모든 조회·디버그에
 - README 라이선스 표기 오류(MIT → GPL-3.0-or-later)를 실제 `pyproject.toml`/`LICENSE` 값과 일치하도록 정정.
 
 ### Added
+- 지역별 화면 수집(`OpinetBrowserCollector.collect_page`)이 단계별 진행을 `INFO` 로그로 남긴다:
+  지역 탐색의 시도별 진행·완료(지역 수), 탭(주유소/충전소) 시작·끝, 탭 안의 시도 단위 진행
+  (`done=i/N`, 누적 주유소 수, 재시도 수)과 탭·전체 경과 시간. 느린 호스트에서 어디서 시간이 드는지
+  보기 위한 것이며 지역 식별자는 기존 진단과 같은 정제 규칙(`_region_label`)을 따른다.
 - `opinet.experimental.OpinetBrowserCollector`: Playwright 기반 지역별 공개 화면 수집기. 시도·시군구·읍면동 목록, 주유소·충전소, 유종별 가격·갱신시각, 상표·부가정보·관찰 가능한 원시 응답 필드를 보존하며 요청 부하 분산용 무작위 화면 간격과 기본 8시간 수집 간격, 최근 24시간 최대 3회 실행 제한을 제공한다. 지역 AJAX/응답 상태 검증, 요청 상한, 접근 거부 감지, 리소스 정리와 실패 콜백을 포함한다.
 - 서비스키 공백/개행 자동 제거와 `.env` 기본 로드, 공식 5개 API 카탈로그(`get_api_catalog_options()` 등), Streamlit Debug Trace 표시용 `DebugRun`, fixture 저장/replay 문서와 예제 앱(`examples/streamlit_debug_app.py`).
 - `StationDetail.to_normalized()`와 `NormalizedFuelStationDetail`, `NormalizedFuelStationDetailPrice` DTO.

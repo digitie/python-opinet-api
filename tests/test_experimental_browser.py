@@ -1408,3 +1408,48 @@ async def test_region_retry_within_budget_completes_collection(monkeypatch, regi
     assert [kind for _, kind, _ in calls] == ["station", "station", "lpg", "lpg"]
     assert len(snapshot.stations) == 1
     assert snapshot.region_retry_count == 2
+
+
+@pytest.mark.asyncio
+async def test_browser_collect_page_logs_stage_progress_per_sido(monkeypatch, region, caplog):
+    seoul_a = replace(region, sido_value="11", sido_name="서울", dong_value=None, dong_name=None)
+    seoul_b = replace(seoul_a, sigungu_value="11680", sigungu_name="강남구")
+    busan = replace(seoul_a, sido_value="26", sido_name="부산", sigungu_value="26110", sigungu_name="중구")
+    collector = OpinetBrowserCollector(throttle=OpinetBrowserThrottle(action_min_seconds=0, action_max_seconds=0))
+
+    async def discover(_page):
+        return [seoul_a, seoul_b, busan]
+
+    async def search(_page, _query_region, *, station_kind):
+        return ()
+
+    monkeypatch.setattr(collector, "_discover_regions", discover)
+    monkeypatch.setattr(collector, "_search_region", search)
+    with caplog.at_level("INFO", logger="opinet.experimental.browser"):
+        await collector.collect_page(_FakeTabPage())
+    messages = [record.getMessage() for record in caplog.records]
+    assert any(m.startswith("Opinet browser region discovery finished: regions=3 query_regions=3") for m in messages)
+    progress = [m for m in messages if m.startswith("Opinet browser tab progress:")]
+    # 탭마다 시도가 바뀔 때와 마지막에 한 줄씩: 서울(2/3), 부산(3/3).
+    assert [m.split(" stations=")[0] for m in progress] == [
+        "Opinet browser tab progress: kind=station sido=11 done=2/3",
+        "Opinet browser tab progress: kind=station sido=26 done=3/3",
+        "Opinet browser tab progress: kind=lpg sido=11 done=2/3",
+        "Opinet browser tab progress: kind=lpg sido=26 done=3/3",
+    ]
+    assert all("elapsed=" in m for m in progress)
+    assert sum(m.startswith("Opinet browser tab started:") for m in messages) == 2
+    assert sum(m.startswith("Opinet browser tab finished:") for m in messages) == 2
+    assert messages[-1].startswith("Opinet browser collection finished: regions=3 stations=0 retries=0 elapsed=")
+
+
+@pytest.mark.asyncio
+async def test_browser_region_discovery_logs_each_sido(caplog):
+    collector = OpinetBrowserCollector(
+        throttle=OpinetBrowserThrottle(action_min_seconds=0.0, action_max_seconds=0.0), query_level="dong",
+    )
+    with caplog.at_level("INFO", logger="opinet.experimental.browser"):
+        await collector._discover_regions(_FakeRegionPage())
+    lines = [r.getMessage() for r in caplog.records if r.getMessage().startswith("Opinet browser region discovery progress:")]
+    assert len(lines) == 1
+    assert lines[0].startswith("Opinet browser region discovery progress: sido=11 done=1/1 sigungu=1 regions=")
