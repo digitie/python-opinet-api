@@ -1242,8 +1242,6 @@ async def test_region_search_second_timeout_fails_with_region_and_attempts(monke
         OpinetAuthError("denied"),
         OpinetServerError("Opinet browser response appears to be an access-block page"),
         ValueError("parse"),
-        # 지역 선택 단계의 시간 초과도 재시도하지 않는다.
-        browser_module._BrowserActionTimeoutError("phase=select:#SIGUNGU_NM0:target=경기도/중구"),
     ],
 )
 async def test_region_search_non_retryable_errors_are_not_retried(monkeypatch, region, error):
@@ -1258,25 +1256,20 @@ async def test_region_search_non_retryable_errors_are_not_retried(monkeypatch, r
 
 
 @pytest.mark.asyncio
-async def test_raw_dom_timeout_is_not_retried_and_reported_without_original_text(monkeypatch, region):
-    """결과 DOM 대기 시간 초과는 차단·빈 화면일 수 있어 재시도하지 않고, 지역만 붙여 정제한다."""
+async def test_raw_dom_timeout_reloads_before_retry_without_leaking_original_text(monkeypatch, region):
+    """결과 DOM 시간 초과도 새 문서에서 재시도하며 원 예외를 노출하지 않는다."""
     raw = TimeoutError("Timeout 60000ms exceeded waiting for certkey=secret")
     collector, calls, reloads = _scripted_search_collector(monkeypatch, [raw, ()])
 
-    with pytest.raises(OpinetServerError) as raised:
-        await collector._search_region_with_retry(object(), region, station_kind="lpg", retry_allowed=True)
-
-    message = str(raised.value)
-    assert "phase=search:lpg:region=경기도/용인시수지구/풍덕천동" in message
-    assert message.endswith("; attempts=1")
-    assert "secret" not in message
-    assert len(calls) == 1
-    assert reloads == []
+    found, retried = await collector._search_region_with_retry(object(), region, station_kind="lpg", retry_allowed=True)
+    assert found == () and retried
+    assert len(calls) == 2
+    assert reloads == [(1, region.sigungu_value, "lpg")]
 
 
 @pytest.mark.asyncio
-async def test_selection_stage_timeout_is_not_retried_on_the_real_path(region):
-    """지역 선택 응답이 오지 않으면 같은 화면에서 다시 고르지 않는다(늦은 응답·같은 이름 시군구 혼입 방지)."""
+async def test_selection_stage_timeout_reloads_document_before_retry(region, monkeypatch):
+    """지역 선택 응답이 오지 않으면 새 문서를 열고 지역을 처음부터 다시 고른다."""
 
     class NoSelectResponsePage(_FakeRegionPage):
         def __init__(self):
@@ -1288,18 +1281,22 @@ async def test_selection_stage_timeout_is_not_retried_on_the_real_path(region):
 
         async def goto(self, url, **_kwargs):
             self.gotos.append(url)
-            raise AssertionError("must not reload for a selection timeout")
+            return _FakeResponse(url)
 
     collector = OpinetBrowserCollector(
         throttle=OpinetBrowserThrottle(action_min_seconds=0.0, action_max_seconds=0.0),
     )
     page = NoSelectResponsePage()
+    async def ready(*args, **kwargs):
+        pass
+    monkeypatch.setattr(collector, "_wait_for_options", ready)
+    monkeypatch.setattr(collector, "_activate_tab", ready)
     with pytest.raises(browser_module._BrowserActionTimeoutError) as raised:
         await collector._search_region_with_retry(page, region, station_kind="station", retry_allowed=True)
 
     assert not isinstance(raised.value, browser_module._SearchResponseTimeoutError)
     assert "phase=select:#SIDO_NM0:target=경기도" in str(raised.value)
-    assert page.gotos == []
+    assert page.gotos == [collector.url]
 
 
 @pytest.mark.asyncio

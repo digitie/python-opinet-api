@@ -1,5 +1,12 @@
 # Changelog
 
+## 2026-10-24 — 지역 체크포인트와 저장 재개
+
+- 선택적인 영속 체크포인트로 지역 목록·완료 결과·요청 예산을 보존하고 미완료 지역부터 재개한다.
+- 완료 스냅샷을 원래 시각으로 재전달하고 DB commit 뒤 명시적으로 소비 완료를 기록한다.
+- 시군구 조회의 읍면동 탐색을 제거한다. `regions` 개수는 실제 조회 단위를 따른다.
+- 지역 선택·DOM 시간 초과와 HTTP 5xx도 새 문서에서 한 번 재시도한다.
+
 ## 2026-09-14 — async-only와 공통 TPS
 
 OpinetClient를 native async 하나로 통합했다. 모든 조회·디버그에 await, 격자 순회에 async for를 사용한다. 공통 AsyncTokenBucket, max_rps/rate_limiter를 공개하고 재시도·리다이렉트마다 TPS를 적용한다. 동기 HTTP·Async 접두사·aio를 제거하고 비동기 VWorld 연동과 동시 디버그를 지원한다.
