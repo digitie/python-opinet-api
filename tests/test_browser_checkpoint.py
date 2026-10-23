@@ -8,7 +8,7 @@ import pytest
 from opinet.experimental import browser as module
 from opinet.experimental._browser_checkpoint import BrowserCheckpoint
 from opinet.exceptions import OpinetServerError
-from test_experimental_browser import _FakeTabPage, _row, _scripted_search_collector, region
+from test_experimental_browser import _FakeTabPage, _row, _scripted_search_collector, _wrapped_timeout, region
 
 
 @pytest.mark.asyncio
@@ -95,3 +95,54 @@ os._exit(7)
         assert checkpoint.meta["requests"] == 1
     finally:
         checkpoint.close()
+
+
+@pytest.mark.asyncio
+async def test_replay_preserves_retries_ignores_new_request_limit_and_read_does_not_start_cycle(tmp_path, monkeypatch, region):
+    import json
+    import sqlite3
+    path = tmp_path / "progress.sqlite3"
+    collector, _, _ = _scripted_search_collector(monkeypatch, [_wrapped_timeout(), (), ()])
+    collector.checkpoint_path = path
+    monkeypatch.setattr(collector, "_discover_regions", AsyncMock(return_value=[region]))
+    snapshot = await collector.collect_page(_FakeTabPage())
+    assert snapshot.region_retry_count == 1
+    limited = module.OpinetBrowserCollector(checkpoint_path=path,
+        throttle=module.OpinetBrowserThrottle(max_search_requests=1))
+    assert await limited.pending_snapshot() == snapshot
+    limited.acknowledge_snapshot(snapshot)
+    with sqlite3.connect(path) as db:
+        before = db.execute("SELECT payload FROM metadata").fetchone()[0]
+        assert json.loads(before)["acknowledged"]
+    assert await limited.pending_snapshot() is None
+    with sqlite3.connect(path) as db:
+        assert db.execute("SELECT payload FROM metadata").fetchone()[0] == before
+
+
+def test_alias_cannot_bypass_single_writer_or_lose_budget(tmp_path):
+    path = tmp_path / "progress.sqlite3"
+    kwargs = dict(url="https://www.opinet.co.kr/searRgSelect.do", query_level="sigungu", max_age=timedelta(hours=12))
+    checkpoint = BrowserCheckpoint(path, **kwargs)
+    alias = tmp_path / "alias.sqlite3"
+    alias.symlink_to(path)
+    try:
+        with pytest.raises(OpinetServerError, match="already in use"):
+            BrowserCheckpoint(alias, **kwargs)
+    finally:
+        checkpoint.close()
+
+
+def test_metadata_corruption_does_not_reset_budget_or_delete_results(tmp_path):
+    import sqlite3
+    path = tmp_path / "progress.sqlite3"
+    kwargs = dict(url="https://www.opinet.co.kr/searRgSelect.do", query_level="sigungu", max_age=timedelta(hours=12))
+    checkpoint = BrowserCheckpoint(path, **kwargs)
+    checkpoint.save("test", ())
+    checkpoint.reserve_request(5)
+    checkpoint.close()
+    with sqlite3.connect(path) as db:
+        db.execute("UPDATE metadata SET payload=replace(payload, '\"version\": 1', '\"version\": 0')")
+    with pytest.raises(OpinetServerError, match="metadata checksum"):
+        BrowserCheckpoint(path, **kwargs)
+    with sqlite3.connect(path) as db:
+        assert db.execute("SELECT count(*) FROM results").fetchone()[0] == 1

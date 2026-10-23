@@ -891,12 +891,12 @@ class OpinetBrowserCollector:
         self._phase_seconds = {name: 0.0 for name in ("selection", "response", "results")}
 
     @contextmanager
-    def _checkpoint(self) -> Iterator[BrowserCheckpoint | None]:
+    def _checkpoint(self, *, read_only: bool = False) -> Iterator[BrowserCheckpoint | None]:
         if self.checkpoint_path is None:
             yield None
             return
         checkpoint = BrowserCheckpoint(self.checkpoint_path, url=self.url, query_level=self.query_level,
-                                       max_age=self.checkpoint_max_age)
+                                       max_age=self.checkpoint_max_age, reset=not read_only)
         try:
             yield checkpoint
         finally:
@@ -907,16 +907,16 @@ class OpinetBrowserCollector:
 
         이 호출 전 실패·프로세스 종료 시 같은 완료 스냅샷을 외부 요청 없이 반환한다.
         """
-        with self._checkpoint() as checkpoint:
-            if checkpoint is not None:
+        with self._checkpoint(read_only=True) as checkpoint:
+            if checkpoint is not None and checkpoint.usable:
                 checkpoint.acknowledge(snapshot.collected_at)
 
     async def pending_snapshot(self) -> OpinetBrowserSnapshot | None:
         """미소비 완료 결과를 외부 통신 없이 읽는다. 만료·미완료이면 None이다."""
         if self.checkpoint_path is None or not self.checkpoint_path.exists():
             return None
-        with self._checkpoint() as checkpoint:
-            if checkpoint is not None and checkpoint.meta["completed_at"]:
+        with self._checkpoint(read_only=True) as checkpoint:
+            if checkpoint is not None and checkpoint.usable and checkpoint.meta["completed_at"]:
                 return await self._collect_page(None, checkpoint)
         return None
 
@@ -999,7 +999,7 @@ class OpinetBrowserCollector:
                      len(query_regions) * 2 - pending_count, pending_count,
                      checkpoint.meta["requests"] if checkpoint is not None else 0)
         search_request_count = pending_count + (checkpoint.meta["requests"] if checkpoint is not None else 0)
-        if search_request_count > self.throttle.max_search_requests:
+        if pending_count and search_request_count > self.throttle.max_search_requests:
             raise OpinetServerError(
                 "Opinet browser search request budget exceeded: "
                 f"{search_request_count} > {self.throttle.max_search_requests}"
@@ -1008,7 +1008,7 @@ class OpinetBrowserCollector:
         # 첫 조회분은 위에서 예약했다. 시간 초과 재시도는 남은 요청 상한에서 차감한다.
         retry_budget = self.throttle.max_search_requests - search_request_count
 
-        retried = 0
+        retried = checkpoint.meta["retry_count"] if checkpoint is not None else 0
         total = len(query_regions)
         for station_kind, tab_selector in _TAB_SELECTORS.items():
             tab_started = time.monotonic()
@@ -1031,7 +1031,7 @@ class OpinetBrowserCollector:
                         checkpoint=checkpoint,
                     )
                     if checkpoint is not None:
-                        checkpoint.save(checkpoint.key(station_kind, region), found)
+                        checkpoint.save(checkpoint.key(station_kind, region), found, retried=region_retried)
                 if region_retried:
                     retry_budget -= 1
                     retried += 1
@@ -1151,6 +1151,7 @@ class OpinetBrowserCollector:
             try:
                 snapshot = await self.collect_once()
                 await sink(snapshot)
+                self.acknowledge_snapshot(snapshot)
             except asyncio.CancelledError:
                 raise
             except Exception as exc:

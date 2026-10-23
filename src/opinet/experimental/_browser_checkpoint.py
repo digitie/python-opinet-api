@@ -51,8 +51,12 @@ def _stations(payload: str) -> tuple[Any, ...]:
 class BrowserCheckpoint:
     """호출 예산·지역 목록·지역 결과·완료 시각을 원자적으로 보존한다."""
 
-    def __init__(self, path: Path, *, url: str, query_level: str, max_age: timedelta) -> None:
+    def __init__(self, path: Path, *, url: str, query_level: str, max_age: timedelta, reset: bool = True) -> None:
         self.max_age = max_age
+        # 같은 파일의 심볼릭 링크 별칭도 같은 잠금을 사용해야 예산 갱신이 유실되지 않는다.
+        path = path.resolve()
+        if path.exists() and path.stat().st_nlink > 1:
+            raise OpinetServerError("Opinet checkpoint must not have hard links")
         path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
         self.lock = sqlite3.connect(str(path) + ".lock", timeout=0)
         try:
@@ -63,22 +67,28 @@ class BrowserCheckpoint:
         try:
             self.db = sqlite3.connect(path)
             self.db.execute("PRAGMA synchronous=FULL")
-            self.db.execute("CREATE TABLE IF NOT EXISTS metadata (id INTEGER PRIMARY KEY CHECK (id=1), payload TEXT NOT NULL)")
+            self.db.execute("CREATE TABLE IF NOT EXISTS metadata (id INTEGER PRIMARY KEY CHECK (id=1), payload TEXT NOT NULL, checksum TEXT NOT NULL)")
             self.db.execute("CREATE TABLE IF NOT EXISTS results (key TEXT PRIMARY KEY, payload TEXT NOT NULL, checksum TEXT NOT NULL)")
-            row = self.db.execute("SELECT payload FROM metadata WHERE id=1").fetchone()
+            row = self.db.execute("SELECT payload,checksum FROM metadata WHERE id=1").fetchone()
+            if row and hashlib.sha256(row[0].encode()).hexdigest() != row[1]:
+                raise OpinetServerError("Opinet checkpoint metadata checksum mismatch")
             self.meta: dict[str, Any] = json.loads(row[0]) if row else {}
+            if row and self.meta.get("version") != 1:
+                raise OpinetServerError("unsupported Opinet checkpoint version")
             now = datetime.now(timezone.utc)
             valid = (self.meta.get("version") == 1 and self.meta.get("url") == url
                      and self.meta.get("query_level") == query_level
                      and not self.meta.get("acknowledged")
                      and timedelta(0) <= now - datetime.fromisoformat(self.meta["started_at"]) < max_age)
-            if not valid:
+            self.usable = valid
+            if not valid and reset:
                 self.meta = {"version": 1, "url": url, "query_level": query_level,
                              "started_at": now.isoformat(), "requests": 0, "regions": None,
-                             "completed_at": None, "acknowledged": False}
+                             "completed_at": None, "acknowledged": False, "retry_count": 0}
                 with self.db:
                     self.db.execute("DELETE FROM results")
                     self._save_meta()
+                self.usable = True
         except BaseException:
             if hasattr(self, "db"):
                 self.db.close()
@@ -90,7 +100,9 @@ class BrowserCheckpoint:
         self.lock.close()
 
     def _save_meta(self) -> None:
-        self.db.execute("INSERT OR REPLACE INTO metadata VALUES (1, ?)", (json.dumps(self.meta),))
+        payload = json.dumps(self.meta, sort_keys=True, allow_nan=False)
+        self.db.execute("INSERT OR REPLACE INTO metadata VALUES (1, ?, ?)",
+                        (payload, hashlib.sha256(payload.encode()).hexdigest()))
 
     def save_regions(self, regions: list[Any]) -> None:
         self.meta["regions"] = _encode(regions)
@@ -123,11 +135,13 @@ class BrowserCheckpoint:
             raise OpinetServerError("Opinet checkpoint region checksum mismatch")
         return _stations(row[0])
 
-    def save(self, key: str, stations: tuple[Any, ...]) -> None:
+    def save(self, key: str, stations: tuple[Any, ...], *, retried: bool = False) -> None:
         payload = json.dumps(_encode(stations), ensure_ascii=False, allow_nan=False)
         with self.db:
             self.db.execute("INSERT OR REPLACE INTO results VALUES (?,?,?)",
                             (key, payload, hashlib.sha256(payload.encode()).hexdigest()))
+            self.meta["retry_count"] += int(retried)
+            self._save_meta()
 
     def complete(self) -> datetime:
         self._check_age()
