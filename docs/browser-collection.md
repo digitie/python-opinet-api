@@ -1,5 +1,28 @@
 # 지역별 웹 화면 수집기
 
+## 2026-10-24 재개와 수집 비용
+
+`OpinetBrowserCollector(checkpoint_path="/persistent/opinet.sqlite3")`는 지역별 정상 결과를
+SQLite에 확정한다. 다음 실행은 저장된 지역 목록과 완료 지역을 읽고 미완료 지역부터
+진행한다. 정상 빈 결과도 완료로 기록하고 요청 예산은 요청 전에 확정해 재기동으로
+초기화하지 않는다. 같은 경로는 단일 작성자만 사용하며 프로세스 종료 시 잠금 DB의
+잠금은 OS가 해제한다. 두 파일은 영속 디렉터리에 둔다. 디스크 부족·손상은 성공이 아니다.
+
+전체 완료 뒤 `collect_once()`와 `pending_snapshot()`은 브라우저를 시작하지 않고 원래
+`collected_at`의 같은 결과를 반환한다. 호출자는 DB commit 뒤
+`collector.acknowledge_snapshot(snapshot)`을 호출한다. 저장 실패는 외부 재조회 없이
+복구하고, commit 뒤 확인 기록 전 중단은 같은 결과를 멱등 저장해 복구한다. 미완료
+결과는 완결 스냅샷으로 제공하지 않는다. 기본 유효기간은 시작부터 12시간이며
+`checkpoint_max_age`로 최대 24시간까지 설정한다. 만료·조회 범위 변경·소비 완료 때
+새 수집을 시작한다. 진행 중 만료도 거부해 오래된 결과를 최신으로 오인하지 않는다.
+
+`sigungu`는 시도별 시군구 목록만 탐색한다. 읍면동 전체 탐색 후 시군구로 축약하던
+불필요한 화면 전환을 제거했다. `snapshot.regions`와 `region_count`는 시군구 목록이며
+`dong`에서는 기존 읍면동 목록을 유지한다. 주유소 지역 문맥과 실제 검색 범위는 같다.
+지역 선택·검색·DOM 시간 초과와 HTTP 5xx는 새 검색 문서에서 탭·지역을 다시 선택해
+한 번 재시도한다. 인증 거부·429·차단·파싱 오류는 그대로 실패한다. 아래 과거 설명 중
+검색 응답만 재시도한다는 제한은 이 절로 대체한다.
+
 `opinet.experimental.OpinetBrowserCollector`는 공식 open API에 포함되지 않은
 실험 기능입니다. `https://www.opinet.co.kr/searRgSelect.do`의 공개 화면을
 Playwright로 열고, 화면의 지역 선택과 조회 동작을 수행한 뒤

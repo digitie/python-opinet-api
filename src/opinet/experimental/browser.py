@@ -19,6 +19,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta
 from types import MappingProxyType
+from pathlib import Path
 from typing import Any, Literal, TypeAlias
 from typing import Iterator
 from urllib.parse import urlsplit
@@ -28,6 +29,7 @@ from .._convert import strip_or_none, to_bool_yn, to_float_or_none
 from ..codes import ProductCode, StationType, is_alddle
 from ..coords import katec_to_wgs84
 from ..exceptions import OpinetAuthError, OpinetError, OpinetRateLimitError, OpinetServerError
+from ._browser_checkpoint import BrowserCheckpoint
 
 BrowserStationKind: TypeAlias = Literal["station", "lpg"]
 BrowserQueryLevel: TypeAlias = Literal["sigungu", "dong"]
@@ -124,11 +126,7 @@ class _BrowserActionTimeoutError(OpinetServerError):
 
 
 class _SearchResponseTimeoutError(_BrowserActionTimeoutError):
-    """'조회' 클릭 뒤 검색 응답 대기 시간 초과. 지역 조회 1회 재시도는 이 경우에만 한다.
-
-    지역 선택 단계의 시간 초과는 재시도하지 않는다. 같은 화면에서 다시 고르면 이미 선택된 값으로
-    보고 응답 검증과 하위 목록 대기를 건너뛰어, 늦게 온 응답이 다른 지역 결과를 섞을 수 있다.
-    """
+    """'조회' 클릭 뒤 검색 응답 대기 시간 초과를 구분하는 진단 오류."""
 
 
 def _region_label(value: str | None) -> str:
@@ -870,6 +868,8 @@ class OpinetBrowserCollector:
         query_level: BrowserQueryLevel = "sigungu",
         throttle: OpinetBrowserThrottle | None = None,
         rng: random.Random | None = None,
+        checkpoint_path: str | Path | None = None,
+        checkpoint_max_age: timedelta = timedelta(hours=12),
     ) -> None:
         if not _is_allowed_opinet_url(url):
             raise ValueError("url must be an HTTPS Opinet URL")
@@ -877,6 +877,8 @@ class OpinetBrowserCollector:
             raise ValueError("timeout_ms must be positive")
         if query_level not in ("sigungu", "dong"):
             raise ValueError("query_level must be 'sigungu' or 'dong'")
+        if not timedelta(0) < checkpoint_max_age <= timedelta(hours=24):
+            raise ValueError("checkpoint_max_age must be positive and at most 24 hours")
         self.url = url
         self.headless = headless
         self.browser_channel = browser_channel
@@ -884,9 +886,49 @@ class OpinetBrowserCollector:
         self.query_level = query_level
         self.throttle = throttle or OpinetBrowserThrottle()
         self.rng = rng or random.Random()
+        self.checkpoint_path = Path(checkpoint_path) if checkpoint_path is not None else None
+        self.checkpoint_max_age = checkpoint_max_age
+        self._phase_seconds = {name: 0.0 for name in ("selection", "response", "results")}
+
+    @contextmanager
+    def _checkpoint(self, *, read_only: bool = False) -> Iterator[BrowserCheckpoint | None]:
+        if self.checkpoint_path is None:
+            yield None
+            return
+        checkpoint = BrowserCheckpoint(self.checkpoint_path, url=self.url, query_level=self.query_level,
+                                       max_age=self.checkpoint_max_age, reset=not read_only)
+        try:
+            yield checkpoint
+        finally:
+            checkpoint.close()
+
+    def acknowledge_snapshot(self, snapshot: OpinetBrowserSnapshot) -> None:
+        """호출자가 DB commit을 확인한 뒤 완료 체크포인트를 소비 완료로 표시한다.
+
+        이 호출 전 실패·프로세스 종료 시 같은 완료 스냅샷을 외부 요청 없이 반환한다.
+        """
+        with self._checkpoint(read_only=True) as checkpoint:
+            if checkpoint is not None and checkpoint.usable:
+                checkpoint.acknowledge(snapshot.collected_at)
+
+    async def pending_snapshot(self) -> OpinetBrowserSnapshot | None:
+        """미소비 완료 결과를 외부 통신 없이 읽는다. 만료·미완료이면 None이다."""
+        if self.checkpoint_path is None or not self.checkpoint_path.exists():
+            return None
+        with self._checkpoint(read_only=True) as checkpoint:
+            if checkpoint is not None and checkpoint.usable and checkpoint.meta["completed_at"]:
+                return await self._collect_page(None, checkpoint)
+        return None
 
     async def collect_once(self) -> OpinetBrowserSnapshot:
         """새 Chromium 컨텍스트로 한 번 전체 지역 수집을 실행한다."""
+        with self._checkpoint() as checkpoint:
+            # 저장만 실패한 실행은 Playwright를 시작하지 않고 같은 결과를 재전달한다.
+            if checkpoint is not None and checkpoint.meta["completed_at"]:
+                return await self._collect_page(None, checkpoint)
+            return await self._collect_browser(checkpoint)
+
+    async def _collect_browser(self, checkpoint: BrowserCheckpoint | None) -> OpinetBrowserSnapshot:
         async_playwright = _load_playwright()
         async with async_playwright() as playwright:
             launch_options: dict[str, Any] = {"headless": self.headless}
@@ -900,7 +942,7 @@ class OpinetBrowserCollector:
                 page = await context.new_page()
                 await self._open_search_page(page)
                 await self._pause(page)
-                return await self.collect_page(page)
+                return await self._collect_page(page, checkpoint) if checkpoint is not None else await self.collect_page(page)
             finally:
                 if context is not None:
                     try:
@@ -928,9 +970,18 @@ class OpinetBrowserCollector:
         단계별 진행(지역 탐색 완료, 탭 시작·끝, 탭 안의 시도 단위 진행)과 경과 시간을 ``INFO`` 로그로
         남긴다. 전체 수집이 수십 분~수 시간 걸리므로 호출자가 어디서 시간이 드는지 볼 수 있게 한다.
         """
+        with self._checkpoint() as checkpoint:
+            return await self._collect_page(page, checkpoint)
+
+    async def _collect_page(self, page: Any, checkpoint: BrowserCheckpoint | None) -> OpinetBrowserSnapshot:
         started = time.monotonic()
+        self._phase_seconds = dict.fromkeys(self._phase_seconds, 0.0)
         _logger.info("Opinet browser collection started: query_level=%s", self.query_level)
-        regions = await self._discover_regions(page)
+        regions = checkpoint.regions() if checkpoint is not None else None
+        if regions is None:
+            regions = await self._discover_regions(page)
+            if checkpoint is not None:
+                checkpoint.save_regions(regions)
         query_regions = self._query_regions(regions)
         _logger.info(
             "Opinet browser region discovery finished: regions=%d query_regions=%d elapsed=%.0fs",
@@ -940,8 +991,15 @@ class OpinetBrowserCollector:
         )
         if not query_regions:
             raise OpinetServerError("Opinet browser returned no queryable regions")
-        search_request_count = len(query_regions) * 2
-        if search_request_count > self.throttle.max_search_requests:
+        completed = {(kind, index): checkpoint.load(checkpoint.key(kind, region))
+                     for kind in _TAB_SELECTORS for index, region in enumerate(query_regions)} if checkpoint is not None else {}
+        pending_count = sum(1 for kind in _TAB_SELECTORS for index in range(len(query_regions))
+                            if completed.get((kind, index)) is None)
+        _logger.info("Opinet browser checkpoint progress: completed=%d pending=%d reserved_requests=%d",
+                     len(query_regions) * 2 - pending_count, pending_count,
+                     checkpoint.meta["requests"] if checkpoint is not None else 0)
+        search_request_count = pending_count + (checkpoint.meta["requests"] if checkpoint is not None else 0)
+        if pending_count and search_request_count > self.throttle.max_search_requests:
             raise OpinetServerError(
                 "Opinet browser search request budget exceeded: "
                 f"{search_request_count} > {self.throttle.max_search_requests}"
@@ -950,7 +1008,7 @@ class OpinetBrowserCollector:
         # 첫 조회분은 위에서 예약했다. 시간 초과 재시도는 남은 요청 상한에서 차감한다.
         retry_budget = self.throttle.max_search_requests - search_request_count
 
-        retried = 0
+        retried = checkpoint.meta["retry_count"] if checkpoint is not None else 0
         total = len(query_regions)
         for station_kind, tab_selector in _TAB_SELECTORS.items():
             tab_started = time.monotonic()
@@ -960,14 +1018,20 @@ class OpinetBrowserCollector:
                 total,
                 tab_started - started,
             )
-            await self._activate_tab(page, station_kind=station_kind, selector=tab_selector)
+            tab_ready = False
             for index, region in enumerate(query_regions, start=1):
-                found, region_retried = await self._search_region_with_retry(
-                    page,
-                    region,
-                    station_kind=station_kind,
-                    retry_allowed=retry_budget > 0,
-                )
+                found = completed.get((station_kind, index - 1))
+                region_retried = False
+                if found is None:
+                    if not tab_ready:
+                        await self._activate_tab(page, station_kind=station_kind, selector=tab_selector)
+                        tab_ready = True
+                    found, region_retried = await self._search_region_with_retry(
+                        page, region, station_kind=station_kind, retry_allowed=retry_budget > 0,
+                        checkpoint=checkpoint,
+                    )
+                    if checkpoint is not None:
+                        checkpoint.save(checkpoint.key(station_kind, region), found, retried=region_retried)
                 if region_retried:
                     retry_budget -= 1
                     retried += 1
@@ -996,6 +1060,8 @@ class OpinetBrowserCollector:
                 time.monotonic() - tab_started,
                 time.monotonic() - started,
             )
+            _logger.info("Opinet browser cumulative phases: selection=%.1fs response=%.1fs results=%.1fs",
+                         self._phase_seconds["selection"], self._phase_seconds["response"], self._phase_seconds["results"])
 
         _logger.info(
             "Opinet browser collection finished: regions=%d stations=%d retries=%d elapsed=%.0fs",
@@ -1005,7 +1071,7 @@ class OpinetBrowserCollector:
             time.monotonic() - started,
         )
         return OpinetBrowserSnapshot(
-            collected_at=datetime.now(_SEOUL),
+            collected_at=checkpoint.complete() if checkpoint is not None else datetime.now(_SEOUL),
             source_url=self.url,
             regions=tuple(regions),
             stations=tuple(stations.values()),
@@ -1085,6 +1151,7 @@ class OpinetBrowserCollector:
             try:
                 snapshot = await self.collect_once()
                 await sink(snapshot)
+                self.acknowledge_snapshot(snapshot)
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
@@ -1176,6 +1243,15 @@ class OpinetBrowserCollector:
             sigungus = await self._read_options(page, "#SIGUNGU_NM0")
             if not sigungus:
                 raise OpinetServerError(f"Opinet browser returned no sigungu options for {sido_value!r}")
+            if self.query_level == "sigungu":
+                # 시군구 조회에는 읍면동 목록이 필요 없다. 수백 번의 불필요한
+                # 화면 전환과 네트워크 대기를 없애고 실제 조회 범위만 탐색한다.
+                regions.extend(BrowserRegion(sido_value=sido_value, sido_name=sido_name,
+                                             sigungu_value=value, sigungu_name=name)
+                               for value, name in sigungus)
+                _logger.info("Opinet browser discovery progress: sido=%s done=%d/%d regions=%d elapsed=%.0fs",
+                             _region_label(sido_value), sido_index, len(sidos), len(regions), time.monotonic() - started)
+                continue
             for sigungu_value, sigungu_name in sigungus:
                 await self._select_value(page, "#SIGUNGU_NM0", sigungu_value, parent=sido_value)
                 dongs = await self._read_options(page, "#DONG_NM")
@@ -1279,26 +1355,30 @@ class OpinetBrowserCollector:
         *,
         station_kind: BrowserStationKind,
         retry_allowed: bool,
+        checkpoint: BrowserCheckpoint | None = None,
     ) -> tuple[tuple[BrowserStation, ...], bool]:
-        """'조회' 검색 응답이 시간 초과되면 화면을 새로 열고 같은 지역을 한 번만 다시 조회한다.
+        """지역 선택·조회 시간 초과와 HTTP 5xx이면 같은 지역을 한 번만 다시 조회한다.
 
-        재시도는 검색 응답 대기 시간 초과(`_SearchResponseTimeoutError`)에만 한다. 지역 선택 단계
-        시간 초과, 결과 DOM 대기 시간 초과(차단·빈 화면일 수 있다), 인증 거부·429·차단 화면·파싱 오류는
-        재시도하지 않는다. 재시도 전에는 검색 화면을 다시 열고(`page.goto`) 탭을 다시 고른 뒤 지역을
+        인증 거부·429·차단 화면·파싱 오류는 재시도하지 않는다.
+        재시도 전에는 검색 화면을 다시 열고(`page.goto`) 탭을 다시 고른 뒤 지역을
         처음부터 고르므로, 첫 시도의 늦은 응답이 다시 시도한 조회의 결과로 쓰이지 않는다. 반환값의 두 번째
         요소는 재시도 요청을 썼는지 여부다(호출자가 요청 상한에서 차감).
         """
         try:
+            if checkpoint is not None:
+                checkpoint.reserve_request(self.throttle.max_search_requests)
             return await self._search_region(page, region, station_kind=station_kind), False
-        except _SearchResponseTimeoutError as exc:
+        except Exception as exc:
+            transient = _is_timeout(exc) or (isinstance(exc, OpinetServerError)
+                                           and exc.status_code is not None and 500 <= exc.status_code < 600)
+            if not transient:
+                raise
             if not retry_allowed:
                 raise _region_timeout_error(exc, region, station_kind, attempts=1, note="retry=budget-exhausted") from None
-        except Exception as exc:
-            if _is_timeout(exc) and not isinstance(exc, OpinetError):
-                raise _region_timeout_error(exc, region, station_kind, attempts=1) from None
-            raise
         await self._reload_search_page(page, region, station_kind=station_kind)
         try:
+            if checkpoint is not None:
+                checkpoint.reserve_request(self.throttle.max_search_requests)
             found = await self._search_region(page, region, station_kind=station_kind, attempt=2)
         except Exception as exc:
             if not _is_timeout(exc):
@@ -1327,6 +1407,7 @@ class OpinetBrowserCollector:
         station_kind: BrowserStationKind,
         attempt: int = 1,
     ) -> tuple[BrowserStation, ...]:
+        selection_started = time.monotonic()
         await self._select_value(page, "#SIDO_NM0", region.sido_value)
         await self._select_value(page, "#SIGUNGU_NM0", region.sigungu_value, parent=region.sido_value)
         await self._select_value(page, "#DONG_NM", region.dong_value or "")
@@ -1342,6 +1423,8 @@ class OpinetBrowserCollector:
                     f"expected {expected!r}, got {actual!r}"
                 )
         await self._pause(page)
+        response_started = time.monotonic()
+        self._phase_seconds["selection"] += response_started - selection_started
 
         phase = f"search:{station_kind}:region={_region_path_label(region)}:attempt={attempt}"
         with _observe_browser_action(page, phase, timeout_error=_SearchResponseTimeoutError):
@@ -1352,6 +1435,8 @@ class OpinetBrowserCollector:
             ) as response_info:
                 await page.get_by_role("link", name="조회", exact=True).click(timeout=self.timeout_ms)
         response = await response_info.value
+        results_started = time.monotonic()
+        self._phase_seconds["response"] += results_started - response_started
         response_endpoint = _SEARCH_ENDPOINT if _has_endpoint(str(response.url), _SEARCH_ENDPOINT) else _PAGE_ENDPOINT
         _validate_response(response, response_endpoint)
         await _reject_blocked_response(response, page=page, timeout_ms=self.timeout_ms)
@@ -1360,14 +1445,17 @@ class OpinetBrowserCollector:
             payload = await response.json()
             if not isinstance(payload, Mapping):
                 raise OpinetServerError(f"{_SEARCH_ENDPOINT}: response must be a JSON object")
-            return parse_browser_response(
+            found = parse_browser_response(
                 payload,
                 region=region,
                 station_kind=station_kind,
                 query_level=self.query_level,
             )
-        await self._wait_for_results_dom(page)
-        return await self._read_dom_stations(page, region=region, station_kind=station_kind)
+        else:
+            await self._wait_for_results_dom(page)
+            found = await self._read_dom_stations(page, region=region, station_kind=station_kind)
+        self._phase_seconds["results"] += time.monotonic() - results_started
+        return found
 
 
 def _region_timeout_error(
