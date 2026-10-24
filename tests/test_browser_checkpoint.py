@@ -7,6 +7,7 @@ import pytest
 
 from opinet.experimental import browser as module
 from opinet.experimental._browser_checkpoint import BrowserCheckpoint
+from opinet import OpinetCheckpointBusyError
 from opinet.exceptions import OpinetServerError
 from test_experimental_browser import _FakeTabPage, _row, _scripted_search_collector, _wrapped_timeout, region
 
@@ -49,7 +50,7 @@ def test_checkpoint_single_writer_and_request_budget_survive_reopen(tmp_path):
     checkpoint = BrowserCheckpoint(path, **kwargs)
     try:
         checkpoint.reserve_request(1)
-        with pytest.raises(OpinetServerError, match="already in use"):
+        with pytest.raises(OpinetCheckpointBusyError, match="already in use"):
             BrowserCheckpoint(path, **kwargs)
     finally:
         checkpoint.close()
@@ -59,6 +60,39 @@ def test_checkpoint_single_writer_and_request_budget_survive_reopen(tmp_path):
             checkpoint.reserve_request(1)
     finally:
         checkpoint.close()
+
+
+@pytest.mark.asyncio
+async def test_pending_snapshot_reports_real_writer_contention_with_typed_error(tmp_path):
+    path = tmp_path / "progress.sqlite3"
+    collector = module.OpinetBrowserCollector(checkpoint_path=path)
+    owner = BrowserCheckpoint(path, url=collector.url, query_level=collector.query_level,
+                              max_age=collector.checkpoint_max_age)
+    try:
+        with pytest.raises(OpinetCheckpointBusyError, match="already in use"):
+            await collector.pending_snapshot()
+    finally:
+        owner.close()
+    assert await collector.pending_snapshot() is None
+
+
+@pytest.mark.parametrize("code", [5, 6, 261, 262, 10, 11, 26, None])
+def test_checkpoint_only_sqlite_busy_and_locked_are_ownership_conflicts(tmp_path, monkeypatch, code):
+    import sqlite3
+    from opinet.experimental import _browser_checkpoint as checkpoint_module
+    from unittest.mock import Mock
+
+    error = sqlite3.OperationalError("disk unavailable")
+    if code is not None:
+        error.sqlite_errorcode = code
+    lock = Mock()
+    lock.execute.side_effect = error
+    monkeypatch.setattr(checkpoint_module.sqlite3, "connect", Mock(return_value=lock))
+    expected = OpinetCheckpointBusyError if code is not None and code & 0xFF in (5, 6) else sqlite3.OperationalError
+    with pytest.raises(expected):
+        BrowserCheckpoint(tmp_path / "progress.sqlite3", url="https://www.opinet.co.kr/searRgSelect.do",
+                          query_level="sigungu", max_age=timedelta(hours=12))
+    lock.close.assert_called_once()
 
 
 @pytest.mark.asyncio

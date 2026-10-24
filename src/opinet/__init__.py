@@ -43,6 +43,7 @@ from .debug import (
 from .transport import AsyncHttpxTransport, Transport
 from .exceptions import (
     OpinetAuthError,
+    OpinetCheckpointBusyError,
     OpinetError,
     OpinetInvalidParameterError,
     OpinetNetworkError,
@@ -79,6 +80,7 @@ __all__ = [
     "NormalizedFuelStationDetailPrice",
     "OilPrice",
     "OpinetAuthError",
+    "OpinetCheckpointBusyError",
     "OpinetClient",
     "OpinetConfig",
     "OpinetDebugClient",

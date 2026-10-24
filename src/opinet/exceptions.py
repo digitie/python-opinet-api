@@ -38,5 +38,9 @@ class OpinetServerError(OpinetError):
     """API 응답이 예기치 않거나 파싱에 실패했을 때의 오류."""
 
 
+class OpinetCheckpointBusyError(OpinetServerError):
+    """다른 수집기가 같은 브라우저 체크포인트의 작성자 잠금을 소유한 상태."""
+
+
 class OpinetNetworkError(OpinetError):
     """오피넷 호출 중 발생한 네트워크 레벨 오류."""

@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import Any
 
 from ..codes import ProductCode, StationType
-from ..exceptions import OpinetServerError
+from ..exceptions import OpinetCheckpointBusyError, OpinetServerError
 
 
 def _encode(value: Any) -> Any:
@@ -61,9 +61,13 @@ class BrowserCheckpoint:
         self.lock = sqlite3.connect(str(path) + ".lock", timeout=0)
         try:
             self.lock.execute("BEGIN IMMEDIATE")
-        except sqlite3.OperationalError:
+        except sqlite3.OperationalError as exc:
             self.lock.close()
-            raise OpinetServerError("Opinet checkpoint is already in use") from None
+            code = getattr(exc, "sqlite_errorcode", None)
+            if code is not None and code & 0xFF in (sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED):
+                raise OpinetCheckpointBusyError("Opinet checkpoint is already in use") from None
+            # 디스크·I/O·파일 형식 오류를 정상 소유권 경합으로 바꾸지 않는다.
+            raise
         try:
             self.db = sqlite3.connect(path)
             self.db.execute("PRAGMA synchronous=FULL")
