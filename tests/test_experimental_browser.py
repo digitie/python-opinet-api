@@ -2,6 +2,8 @@ import asyncio
 from dataclasses import replace
 from datetime import datetime, timedelta
 import random
+from unittest.mock import AsyncMock
+from urllib.parse import urlencode
 from types import SimpleNamespace
 
 import pytest
@@ -433,6 +435,55 @@ async def test_default_action_delays_remain_random_and_bounded():
     assert sum(page.waits) / len(page.waits) * 1150 < 180_000
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("kind", ["image", "font", "media", "document", "script", "stylesheet", "xhr", "fetch", "other"])
+async def test_browser_resource_policy_keeps_scripts_and_price_data(kind):
+    route = SimpleNamespace(request=SimpleNamespace(resource_type=kind), abort=AsyncMock(), continue_=AsyncMock())
+    await browser_module._route_collection_resource(route)
+    if kind in {"image", "font", "media"}:
+        route.abort.assert_awaited_once_with("blockedbyclient")
+        route.continue_.assert_not_awaited()
+    else:
+        route.continue_.assert_awaited_once_with()
+        route.abort.assert_not_awaited()
+
+
+@pytest.mark.parametrize("payload", [None, [], {}, {"result": {}}, {"result": [None]}, {"result": [{}]}, {"result": [{"SIGUNGU_NM": " "}]}])
+def test_sigungu_response_cannot_turn_invalid_payload_into_empty_options(payload):
+    with pytest.raises(OpinetServerError):
+        browser_module._sigungu_options(payload)
+
+
+def test_sigungu_response_preserves_order_and_empty_result():
+    assert browser_module._sigungu_options({"result": []}) == []
+    assert browser_module._sigungu_options({"result": [{"SIGUNGU_NM": "중구"}, {"SIGUNGU_NM": " 종로구 "}]}) == [
+        ["중구", "중구"], ["종로구", "종로구"]]
+
+
+@pytest.mark.parametrize("changed", ["OS_NM", "OS_ADDR", "SIDO_NM0", "SIDO_NM", "SIGUNGU_NM0", "SIGUNGU_NM",
+                                    "DONG_NM", "SEARCH_MOD", "BTN_DIV", "LPG_YN", "iframe", "duplicates"])
+def test_auto_query_reuse_rejects_different_search_scope(region, changed):
+    region = replace(region, dong_value=None, dong_name=None)
+    frame = object()
+    page = SimpleNamespace(main_frame=frame)
+    fields = {"SIDO_NM0": region.sido_value, "SIDO_NM": region.sido_value,
+              "SIGUNGU_NM0": region.sigungu_value, "SIGUNGU_NM": region.sigungu_value,
+              "DONG_NM": "", "SEARCH_MOD": "addr", "OS_NM": "", "OS_ADDR": "",
+              "BTN_DIV": "os_btn", "LPG_YN": ""}
+    request = SimpleNamespace(method="POST", frame=frame, is_navigation_request=lambda: True,
+                              post_data=urlencode(fields))
+    response = SimpleNamespace(request=request, url="https://www.opinet.co.kr/searRgSelect.do")
+    assert browser_module._automatic_sigungu_result(page, response, region, "station")
+    if changed == "iframe":
+        request.frame = object()
+    elif changed == "duplicates":
+        request.post_data += "&SIDO_NM0=" + region.sido_value
+    else:
+        fields[changed] = "다름"
+        request.post_data = urlencode(fields)
+    assert not browser_module._automatic_sigungu_result(page, response, region, "station")
+
+
 def test_browser_loader_reports_optional_dependency(monkeypatch):
     def missing(_name):
         raise ModuleNotFoundError("playwright")
@@ -561,6 +612,9 @@ class _FakeRegionPage(_FakeEvents):
         self.locators = {}
         self.waits = []
 
+    async def evaluate(self, _script, **_kwargs):
+        return 1.0
+
     def locator(self, selector):
         if selector.endswith(" option"):
             base = selector.removesuffix(" option")
@@ -588,7 +642,7 @@ class _FakeRegionPage(_FakeEvents):
     def expect_response(self, predicate, timeout):
         assert timeout > 0
         candidates = (
-            _FakeResponse("https://www.opinet.co.kr/common/sigunguGisSelect.do"),
+            _FakeResponse("https://www.opinet.co.kr/common/sigunguGisSelect.do", payload={"result": [{"SIGUNGU_NM": "11680"}]}),
             _FakeResponse("https://www.opinet.co.kr/common/geocodeUtmkSelect.do"),
         )
         for response in candidates:
@@ -640,9 +694,13 @@ async def test_region_selection_waits_for_body_after_response_headers(finish_bod
     body_received = asyncio.Event()
 
     class StreamingResponse(_FakeResponse):
-        async def finished(self):
+        async def body(self):
             headers_received.set()
             await body_received.wait()
+            return b"{}"
+
+        async def json(self):
+            return {"result": []}
 
     class StreamingPage(_FakeRegionPage):
         def expect_response(self, predicate, timeout):
@@ -675,8 +733,8 @@ class _FakeResponse:
         self.text_body = text_body
         self.request = SimpleNamespace(method="POST")
 
-    async def finished(self):
-        return None
+    async def body(self):
+        return self.text_body.encode()
 
     async def header_value(self, _name):
         return self.content_type
@@ -786,7 +844,7 @@ class _FakeSearchPage(_FakeEvents):
         self.selectors = {}
         self.waits = []
 
-    async def evaluate(self, _script):
+    async def evaluate(self, _script, **_kwargs):
         return 1.0
 
     def locator(self, selector):
@@ -920,6 +978,10 @@ class _FakeTabPage(_FakeEvents):
 
     def locator(self, selector):
         return self.tabs[selector]
+
+    async def evaluate(self, _script, *, arg):
+        attributes = self.tabs[arg["selector"]].attributes
+        return attributes.get("aria-selected") == "true" or attributes.get("class") == "on"
 
     def expect_response(self, predicate, timeout):
         assert timeout > 0
@@ -1114,6 +1176,10 @@ async def test_browser_wait_and_collect_once_lifecycle(monkeypatch, region):
             pass
 
     class FakeContext:
+        async def route(self, pattern, handler):
+            assert pattern == "**/*"
+            assert handler is browser_module._route_collection_resource
+
         async def new_page(self):
             return FakePage()
 
