@@ -428,11 +428,10 @@ async def test_default_action_delays_remain_random_and_bounded():
     for _ in range(100):
         await collector._pause(page)
     assert len(page.waits) == 100
-    assert min(page.waits) >= 50
-    assert max(page.waits) <= 150
+    assert min(page.waits) >= 150
+    assert max(page.waits) <= 850
     assert len(set(page.waits)) > 20
-    # 전국 약230개 시군구의 두 탭에서 조작 대기가 시간을 지배하지 않는다.
-    assert sum(page.waits) / len(page.waits) * 1150 < 180_000
+    assert 400 <= sum(page.waits) / len(page.waits) <= 600
 
 
 @pytest.mark.asyncio
@@ -463,6 +462,42 @@ async def test_browser_resource_policy_preserves_cache_and_drains_tasks(closed, 
     assert session.detach.await_count == (0 if closed else 1)
     assert any(call.args == ("Fetch.failRequest", {"requestId": "visual", "errorReason": "BlockedByClient"})
                for call in session.send.await_args_list)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stuck", ["Fetch.failRequest", "Fetch.disable", "detach"])
+async def test_resource_policy_cleanup_is_bounded_after_cancellation(monkeypatch, stuck):
+    monkeypatch.setattr(browser_module, "_RESOURCE_CLEANUP_TIMEOUT_SECONDS", 0.02, raising=False)
+    handlers = {}
+    blocked = asyncio.Event()
+    ready = asyncio.Event()
+    async def send(method, params=None):
+        if method == stuck:
+            await blocked.wait()
+    async def detach():
+        if stuck == "detach":
+            await blocked.wait()
+    session = SimpleNamespace(send=send, detach=detach,
+                              on=lambda event, handler: handlers.update({event: handler}),
+                              remove_listener=lambda event, handler: handlers.pop(event))
+    page = SimpleNamespace(context=SimpleNamespace(new_cdp_session=AsyncMock(return_value=session)),
+                           is_closed=lambda: False)
+    async def collect():
+        async with browser_module._collection_resource_policy(page):
+            handlers["Fetch.requestPaused"]({"requestId": "visual"})
+            ready.set()
+            await asyncio.Event().wait()
+    task = asyncio.create_task(collect())
+    try:
+        await ready.wait()
+        task.cancel()
+        await asyncio.wait_for(asyncio.shield(task), 0.3)
+    except TimeoutError:
+        assert task.done(), "CDP 정리가 멈추면 수집 취소도 끝나지 않는다"
+    finally:
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+    assert not handlers
 
 
 @pytest.mark.parametrize("payload", [None, [], {}, {"result": {}}, {"result": [None]}, {"result": [{}]}, {"result": [{"SIGUNGU_NM": " "}]}])

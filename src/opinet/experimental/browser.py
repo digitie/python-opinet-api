@@ -37,6 +37,7 @@ BrowserQueryLevel: TypeAlias = Literal["sigungu", "dong"]
 _SEOUL = ZoneInfo("Asia/Seoul")
 _SEARCH_ENDPOINT = "searRgCircleAjax.do"
 _PAGE_ENDPOINT = "searRgSelect.do"
+_RESOURCE_CLEANUP_TIMEOUT_SECONDS = 5.0
 _REGION_ENDPOINTS_BY_SELECTOR = {
     "#SIDO_NM0": ("sigunguGisSelect.do",),
     "#SIGUNGU_NM0": ("geocodeUtmkSelect.do", _PAGE_ENDPOINT),
@@ -293,13 +294,18 @@ async def _collection_resource_policy(page: Any) -> AsyncIterator[None]:
     finally:
         session.remove_listener("Fetch.requestPaused", paused)
         try:
-            if not page.is_closed():
-                await session.send("Fetch.disable")
+            async with asyncio.timeout(_RESOURCE_CLEANUP_TIMEOUT_SECONDS):
+                if not page.is_closed():
+                    await session.send("Fetch.disable")
+                if pending:
+                    await asyncio.gather(*pending, return_exceptions=True)
+                if not page.is_closed():
+                    await session.detach()
         finally:
+            for task in pending:
+                task.cancel()
             if pending:
                 await asyncio.gather(*pending, return_exceptions=True)
-            if not page.is_closed():
-                await session.detach()
     if failures and not page.is_closed():
         raise OpinetServerError("Opinet browser resource policy failed") from failures[0]
 
@@ -668,8 +674,8 @@ class OpinetBrowserSnapshot:
 class OpinetBrowserThrottle:
     """화면 조작과 전체 실행 사이의 부하 분산 정책."""
 
-    action_min_seconds: float = 0.05
-    action_max_seconds: float = 0.15
+    action_min_seconds: float = 0.15
+    action_max_seconds: float = 0.85
     run_interval_min: timedelta = timedelta(hours=8)
     run_interval_max: timedelta = timedelta(hours=8)
     max_runs_per_24h: int = 3
