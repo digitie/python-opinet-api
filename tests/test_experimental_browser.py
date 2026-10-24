@@ -428,24 +428,93 @@ async def test_default_action_delays_remain_random_and_bounded():
     for _ in range(100):
         await collector._pause(page)
     assert len(page.waits) == 100
-    assert min(page.waits) >= 50
-    assert max(page.waits) <= 150
+    assert min(page.waits) >= 150
+    assert max(page.waits) <= 850
     assert len(set(page.waits)) > 20
-    # 전국 약230개 시군구의 두 탭에서 조작 대기가 시간을 지배하지 않는다.
-    assert sum(page.waits) / len(page.waits) * 1150 < 180_000
+    assert 400 <= sum(page.waits) / len(page.waits) <= 600
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("kind", ["image", "font", "media", "document", "script", "stylesheet", "xhr", "fetch", "other"])
-async def test_browser_resource_policy_keeps_scripts_and_price_data(kind):
-    route = SimpleNamespace(request=SimpleNamespace(resource_type=kind), abort=AsyncMock(), continue_=AsyncMock())
-    await browser_module._route_collection_resource(route)
-    if kind in {"image", "font", "media"}:
-        route.abort.assert_awaited_once_with("blockedbyclient")
-        route.continue_.assert_not_awaited()
+@pytest.mark.parametrize("closed,error", [(False, False), (True, True), (False, True)])
+async def test_browser_resource_policy_preserves_cache_and_drains_tasks(closed, error):
+    handlers = {}
+    session = SimpleNamespace(send=AsyncMock(), detach=AsyncMock(),
+                              on=lambda event, handler: handlers.update({event: handler}),
+                              remove_listener=lambda event, handler: handlers.pop(event))
+    page = SimpleNamespace(context=SimpleNamespace(new_cdp_session=AsyncMock(return_value=session)),
+                           is_closed=lambda: closed)
+    async def exercise():
+        async with browser_module._collection_resource_policy(page):
+            session.send.assert_awaited_once_with("Fetch.enable", {"patterns": [
+                {"resourceType": kind, "requestStage": "Request"} for kind in ("Image", "Font", "Media")
+            ]})
+            if error:
+                session.send.side_effect = RuntimeError("CDP failure")
+            handlers["Fetch.requestPaused"]({"requestId": "visual"})
+            await asyncio.sleep(0)
+            session.send.side_effect = None
+    if error and not closed:
+        with pytest.raises(OpinetServerError, match="resource policy failed"):
+            await exercise()
     else:
-        route.continue_.assert_awaited_once_with()
-        route.abort.assert_not_awaited()
+        await exercise()
+    assert not handlers
+    assert session.detach.await_count == (0 if closed else 1)
+    assert any(call.args == ("Fetch.failRequest", {"requestId": "visual", "errorReason": "BlockedByClient"})
+               for call in session.send.await_args_list)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stuck", ["Fetch.failRequest", "Fetch.disable", "detach"])
+@pytest.mark.parametrize("body_error", ["cancel", "auth", "run_forever"])
+async def test_resource_policy_cleanup_preserves_the_original_failure(monkeypatch, stuck, body_error):
+    monkeypatch.setattr(browser_module, "_RESOURCE_CLEANUP_TIMEOUT_SECONDS", 0.02, raising=False)
+    handlers = {}
+    blocked = asyncio.Event()
+    ready = asyncio.Event()
+    fail_body = asyncio.Event()
+    async def send(method, params=None):
+        if method == stuck:
+            await blocked.wait()
+    async def detach():
+        if stuck == "detach":
+            await blocked.wait()
+    session = SimpleNamespace(send=send, detach=detach,
+                              on=lambda event, handler: handlers.update({event: handler}),
+                              remove_listener=lambda event, handler: handlers.pop(event))
+    page = SimpleNamespace(context=SimpleNamespace(new_cdp_session=AsyncMock(return_value=session)),
+                           is_closed=lambda: False)
+    async def collect():
+        async with browser_module._collection_resource_policy(page):
+            handlers["Fetch.requestPaused"]({"requestId": "visual"})
+            ready.set()
+            await fail_body.wait()
+            raise OpinetAuthError("blocked")
+    errors = []
+    stop = asyncio.Event()
+    async def on_error(error):
+        errors.append(error)
+        stop.set()
+    collector = OpinetBrowserCollector()
+    monkeypatch.setattr(collector, "collect_once", collect)
+    task = asyncio.create_task(collector.run_forever(AsyncMock(), stop_event=stop, on_error=on_error)
+                               if body_error == "run_forever" else collect())
+    try:
+        await ready.wait()
+        if body_error != "auth":
+            task.cancel()
+        else:
+            fail_body.set()
+        expected = OpinetAuthError if body_error == "auth" else asyncio.CancelledError
+        with pytest.raises(expected):
+            await asyncio.wait_for(asyncio.shield(task), 0.3)
+        assert task.done()
+        assert task.cancelled() is (body_error != "auth")
+        assert errors == []
+    finally:
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+    assert not handlers
 
 
 @pytest.mark.parametrize("payload", [None, [], {}, {"result": {}}, {"result": [None]}, {"result": [{}]}, {"result": [{"SIGUNGU_NM": " "}]}])
@@ -1168,6 +1237,13 @@ async def test_browser_wait_and_collect_once_lifecycle(monkeypatch, region):
     class FakePage:
         url = "https://www.opinet.co.kr/searRgSelect.do"
 
+        @property
+        def context(self):
+            return FakeContext()
+
+        def is_closed(self):
+            return False
+
         async def goto(self, url, **kwargs):
             entered.append((url, kwargs))
             return _FakeResponse(url, content_type="text/html")
@@ -1176,9 +1252,9 @@ async def test_browser_wait_and_collect_once_lifecycle(monkeypatch, region):
             pass
 
     class FakeContext:
-        async def route(self, pattern, handler):
-            assert pattern == "**/*"
-            assert handler is browser_module._route_collection_resource
+        async def new_cdp_session(self, page):
+            return SimpleNamespace(send=AsyncMock(), detach=AsyncMock(), on=lambda *args: None,
+                                   remove_listener=lambda *args: None)
 
         async def new_page(self):
             return FakePage()
