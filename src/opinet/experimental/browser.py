@@ -18,6 +18,7 @@ from collections.abc import Awaitable, Callable, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta
+from html.parser import HTMLParser
 from types import MappingProxyType
 from pathlib import Path
 from typing import Any, Literal, TypeAlias
@@ -207,17 +208,18 @@ def _validate_response(response: Any, endpoint: str) -> None:
     raise OpinetServerError(f"Opinet browser response failed: HTTP {status}", status_code=status)
 
 
-async def _reject_blocked_response(response: Any, *, page: Any = None, timeout_ms: int = 30_000) -> None:
+async def _reject_blocked_response(response: Any, *, page: Any = None, timeout_ms: int = 30_000) -> str | None:
     """차단·CAPTCHA 페이지를 정상적인 빈 결과로 처리하지 않는다."""
     content_type = ""
     header_value = getattr(response, "header_value", None)
     if callable(header_value):
         content_type = (await header_value("content-type") or "").lower()
     if "html" not in content_type:
-        return
+        return None
     text_method = getattr(response, "text", None)
     if not callable(text_method):
-        return
+        return None
+    source_body = True
     try:
         body = await text_method()
     except Exception as exc:
@@ -244,13 +246,43 @@ async def _reject_blocked_response(response: Any, *, page: Any = None, timeout_m
             raise OpinetServerError("unexpected Opinet browser navigation while reading response") from exc
         await page.wait_for_load_state("domcontentloaded", timeout=timeout_ms)
         body = await page.content()
+        source_body = False
         if str(page.url) != current_url:
             raise OpinetServerError("Opinet browser navigation changed while reading document") from exc
+    original_body = body
     body = body[:20_000].lower()
     if "the service is not available." in body:
         raise OpinetServerError("Opinet browser returned a service-unavailable page")
     if any(marker in body for marker in _BLOCKED_PAGE_MARKERS):
         raise OpinetServerError("Opinet browser response appears to be an access-block page")
+    return original_body if source_body else None
+
+
+class _ServerResultLinks(HTMLParser):
+    """응답 HTML에 이미 완성된 일반 주유소 결과가 있는지 확인한다."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.table_depth = 0
+        self.links: set[str] = set()
+        self.has_dynamic_fields = False
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        values = dict(attrs)
+        if tag == "table":
+            if self.table_depth or "tbl_type10" in (values.get("class") or "").split():
+                self.table_depth += 1
+        if self.table_depth and tag == "a":
+            href = values.get("href") or ""
+            if href.startswith("javascript:fn_osPop("):
+                self.links.add(href)
+            elif href.startswith("javascript:fnVolatInfowindow("):
+                # 이 경로는 가격·라벨도 DOM에서 읽으므로 기존 load 경계를 유지한다.
+                self.has_dynamic_fields = True
+
+    def handle_endtag(self, tag: str) -> None:
+        if tag == "table" and self.table_depth:
+            self.table_depth -= 1
 
 
 @contextmanager
@@ -587,8 +619,8 @@ class OpinetBrowserSnapshot:
 class OpinetBrowserThrottle:
     """화면 조작과 전체 실행 사이의 부하 분산 정책."""
 
-    action_min_seconds: float = 0.25
-    action_max_seconds: float = 1.25
+    action_min_seconds: float = 0.05
+    action_max_seconds: float = 0.15
     run_interval_min: timedelta = timedelta(hours=8)
     run_interval_max: timedelta = timedelta(hours=8)
     max_runs_per_24h: int = 3
@@ -1104,7 +1136,35 @@ class OpinetBrowserCollector:
             timeout=self.timeout_ms,
         )
 
-    async def _wait_for_results_dom(self, page: Any) -> None:
+    async def _wait_for_results_dom(
+        self, page: Any, *, response_body: str | None = None,
+        previous_document: float | None = None, region: BrowserRegion | None = None,
+        station_kind: BrowserStationKind = "station",
+    ) -> None:
+        rendered = _ServerResultLinks()
+        if response_body is not None:
+            rendered.feed(response_body)
+        if rendered.links and not rendered.has_dynamic_fields and previous_document is not None and region is not None:
+            # 새 문서·선택값·응답에 있던 모든 원본 필드의 일치를 확인한다. 이미지·지도
+            # load가 늦어도 이미 완성된 결과를 읽는다. 빈/동적 결과는 아래 기존 대기를 쓴다.
+            await page.wait_for_function(
+                "({previous, values, links, tab}) => { "
+                "if (performance.timeOrigin === previous || document.readyState === 'loading') return false; "
+                "if (!values.every(([selector, value]) => document.querySelector(selector)?.value === value)) return false; "
+                "const active = document.querySelector(tab); "
+                "if (!active || !(active.getAttribute('aria-selected') === 'true' || "
+                "['on', 'active', 'selected'].some(name => active.classList.contains(name)))) return false; "
+                "const actual = new Set(Array.from(document.querySelectorAll('table.tbl_type10 a'), "
+                "a => a.getAttribute('href')).filter(href => href && "
+                "(href.startsWith('javascript:fn_osPop(') || href.startsWith('javascript:fnVolatInfowindow(')))); "
+                "return actual.size === links.length && links.every(link => actual.has(link)); }",
+                arg={"previous": previous_document,
+                     "values": [["#SIDO_NM0", region.sido_value], ["#SIGUNGU_NM0", region.sigungu_value],
+                                ["#DONG_NM", region.dong_value or ""]],
+                     "links": sorted(rendered.links), "tab": _TAB_SELECTORS[station_kind]},
+                timeout=self.timeout_ms,
+            )
+            return
         await page.wait_for_function(
             "() => document.readyState === 'complete' && "
             "document.querySelector('table.tbl_type10') !== null",
@@ -1427,6 +1487,7 @@ class OpinetBrowserCollector:
         self._phase_seconds["selection"] += response_started - selection_started
 
         phase = f"search:{station_kind}:region={_region_path_label(region)}:attempt={attempt}"
+        previous_document = await page.evaluate("() => performance.timeOrigin")
         with _observe_browser_action(page, phase, timeout_error=_SearchResponseTimeoutError):
             async with page.expect_response(
                 lambda response: _is_post_response(response, _SEARCH_ENDPOINT)
@@ -1439,7 +1500,7 @@ class OpinetBrowserCollector:
         self._phase_seconds["response"] += results_started - response_started
         response_endpoint = _SEARCH_ENDPOINT if _has_endpoint(str(response.url), _SEARCH_ENDPOINT) else _PAGE_ENDPOINT
         _validate_response(response, response_endpoint)
-        await _reject_blocked_response(response, page=page, timeout_ms=self.timeout_ms)
+        response_body = await _reject_blocked_response(response, page=page, timeout_ms=self.timeout_ms)
         content_type = (await response.header_value("content-type") or "").lower()
         if response_endpoint == _SEARCH_ENDPOINT or "json" in content_type:
             payload = await response.json()
@@ -1452,7 +1513,11 @@ class OpinetBrowserCollector:
                 query_level=self.query_level,
             )
         else:
-            await self._wait_for_results_dom(page)
+            is_navigation = getattr(response.request, "is_navigation_request", None)
+            await self._wait_for_results_dom(
+                page, response_body=response_body, region=region, station_kind=station_kind,
+                previous_document=previous_document if callable(is_navigation) and is_navigation() else None,
+            )
             found = await self._read_dom_stations(page, region=region, station_kind=station_kind)
         self._phase_seconds["results"] += time.monotonic() - results_started
         return found

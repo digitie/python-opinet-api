@@ -419,6 +419,20 @@ def test_browser_collector_rejects_non_opinet_url():
         OpinetBrowserCollector(query_level="invalid")
 
 
+@pytest.mark.asyncio
+async def test_default_action_delays_remain_random_and_bounded():
+    page = _FakeRegionPage()
+    collector = OpinetBrowserCollector(rng=random.Random(23))
+    for _ in range(100):
+        await collector._pause(page)
+    assert len(page.waits) == 100
+    assert min(page.waits) >= 50
+    assert max(page.waits) <= 150
+    assert len(set(page.waits)) > 20
+    # 전국 약230개 시군구의 두 탭에서 조작 대기가 시간을 지배하지 않는다.
+    assert sum(page.waits) / len(page.waits) * 1150 < 180_000
+
+
 def test_browser_loader_reports_optional_dependency(monkeypatch):
     def missing(_name):
         raise ModuleNotFoundError("playwright")
@@ -735,6 +749,9 @@ class _FakeSearchPage(_FakeEvents):
         self.records = records
         self.selectors = {}
         self.waits = []
+
+    async def evaluate(self, _script):
+        return 1.0
 
     def locator(self, selector):
         if selector == "table.tbl_type10 tbody tr":
