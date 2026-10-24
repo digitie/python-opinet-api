@@ -286,26 +286,35 @@ async def _collection_resource_policy(page: Any) -> AsyncIterator[None]:
         task.add_done_callback(pending.discard)
 
     session.on("Fetch.requestPaused", paused)
+    body_failed = False
     try:
         await session.send("Fetch.enable", {"patterns": [
             {"resourceType": kind, "requestStage": "Request"} for kind in ("Image", "Font", "Media")
         ]})
         yield
+    except BaseException:
+        body_failed = True
+        raise
     finally:
         session.remove_listener("Fetch.requestPaused", paused)
         try:
-            async with asyncio.timeout(_RESOURCE_CLEANUP_TIMEOUT_SECONDS):
-                if not page.is_closed():
-                    await session.send("Fetch.disable")
+            try:
+                async with asyncio.timeout(_RESOURCE_CLEANUP_TIMEOUT_SECONDS):
+                    if not page.is_closed():
+                        await session.send("Fetch.disable")
+                    if pending:
+                        await asyncio.gather(*pending, return_exceptions=True)
+                    if not page.is_closed():
+                        await session.detach()
+            finally:
+                for task in pending:
+                    task.cancel()
                 if pending:
                     await asyncio.gather(*pending, return_exceptions=True)
-                if not page.is_closed():
-                    await session.detach()
-        finally:
-            for task in pending:
-                task.cancel()
-            if pending:
-                await asyncio.gather(*pending, return_exceptions=True)
+        except Exception:
+            # 정리 실패가 원래 취소·인증/차단 오류를 일반 재시도 오류로 바꾸지 않는다.
+            if not body_failed:
+                raise
     if failures and not page.is_closed():
         raise OpinetServerError("Opinet browser resource policy failed") from failures[0]
 

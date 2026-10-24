@@ -466,11 +466,13 @@ async def test_browser_resource_policy_preserves_cache_and_drains_tasks(closed, 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("stuck", ["Fetch.failRequest", "Fetch.disable", "detach"])
-async def test_resource_policy_cleanup_is_bounded_after_cancellation(monkeypatch, stuck):
+@pytest.mark.parametrize("body_error", ["cancel", "auth", "run_forever"])
+async def test_resource_policy_cleanup_preserves_the_original_failure(monkeypatch, stuck, body_error):
     monkeypatch.setattr(browser_module, "_RESOURCE_CLEANUP_TIMEOUT_SECONDS", 0.02, raising=False)
     handlers = {}
     blocked = asyncio.Event()
     ready = asyncio.Event()
+    fail_body = asyncio.Event()
     async def send(method, params=None):
         if method == stuck:
             await blocked.wait()
@@ -486,14 +488,29 @@ async def test_resource_policy_cleanup_is_bounded_after_cancellation(monkeypatch
         async with browser_module._collection_resource_policy(page):
             handlers["Fetch.requestPaused"]({"requestId": "visual"})
             ready.set()
-            await asyncio.Event().wait()
-    task = asyncio.create_task(collect())
+            await fail_body.wait()
+            raise OpinetAuthError("blocked")
+    errors = []
+    stop = asyncio.Event()
+    async def on_error(error):
+        errors.append(error)
+        stop.set()
+    collector = OpinetBrowserCollector()
+    monkeypatch.setattr(collector, "collect_once", collect)
+    task = asyncio.create_task(collector.run_forever(AsyncMock(), stop_event=stop, on_error=on_error)
+                               if body_error == "run_forever" else collect())
     try:
         await ready.wait()
-        task.cancel()
-        await asyncio.wait_for(asyncio.shield(task), 0.3)
-    except TimeoutError:
-        assert task.done(), "CDP 정리가 멈추면 수집 취소도 끝나지 않는다"
+        if body_error != "auth":
+            task.cancel()
+        else:
+            fail_body.set()
+        expected = OpinetAuthError if body_error == "auth" else asyncio.CancelledError
+        with pytest.raises(expected):
+            await asyncio.wait_for(asyncio.shield(task), 0.3)
+        assert task.done()
+        assert task.cancelled() is (body_error != "auth")
+        assert errors == []
     finally:
         task.cancel()
         await asyncio.gather(task, return_exceptions=True)
