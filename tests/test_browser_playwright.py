@@ -3,12 +3,108 @@
 import asyncio
 import html
 import json
+from collections import Counter
+from contextlib import AsyncExitStack
 from urllib.parse import parse_qs
 
 import pytest
 
 from opinet.exceptions import OpinetServerError
-from opinet.experimental.browser import BrowserRegion, OpinetBrowserCollector, OpinetBrowserThrottle, _OS_POP_FIELDS, _route_collection_resource
+from opinet.experimental.browser import BrowserRegion, OpinetBrowserCollector, OpinetBrowserThrottle, _OS_POP_FIELDS, _collection_resource_policy
+
+
+@pytest.mark.asyncio
+async def test_page_close_drains_an_inflight_visual_block(monkeypatch):
+    api = pytest.importorskip("playwright.async_api", reason="browser extra가 필요한 검증")
+    async with api.async_playwright() as playwright:
+        browser = await playwright.chromium.launch()
+        release = asyncio.Event()
+        entered = asyncio.Event()
+        try:
+            page = await browser.new_page()
+            session = await page.context.new_cdp_session(page)
+            send = session.send
+            async def delayed_send(method, params=None):
+                if method == "Fetch.failRequest":
+                    entered.set()
+                    await release.wait()
+                return await send(method, params)
+            monkeypatch.setattr(session, "send", delayed_send)
+            async def existing_session(_page):
+                return session
+            monkeypatch.setattr(page.context, "new_cdp_session", existing_session)
+            async with _collection_resource_policy(page):
+                await page.set_content('<img src="http://127.0.0.1/unused.png">', wait_until="domcontentloaded")
+                await asyncio.wait_for(entered.wait(), 3)
+                await page.close()
+                release.set()
+            assert page.is_closed()
+        finally:
+            release.set()
+            await browser.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("block_visual", [False, True])
+async def test_visual_blocking_preserves_http_cache_across_form_posts(block_visual):
+    api = pytest.importorskip("playwright.async_api", reason="browser extra가 필요한 검증")
+    requests = Counter()
+    bodies = {
+        "/": ("text/html", b'<script src="/app.js"></script><link rel="stylesheet" href="/app.css">'
+              b'<form method="POST" action="/"><button>next</button></form><img src="/image.png">'),
+        "/app.js": ("application/javascript", b'window.scriptLoaded=true;fetch("/data").then(r=>r.json()).then(v=>window.price=v.price)'),
+        "/app.css": ("text/css", b'body { color: rgb(1, 2, 3); }'),
+        "/data": ("application/json", b'{"price":1800}'),
+        "/image.png": ("image/png", b""),
+    }
+
+    async def respond(reader, writer):
+        try:
+            header = (await reader.readuntil(b"\r\n\r\n")).decode("latin1")
+            path = header.split(" ")[1]
+            length = next((int(line.split(":", 1)[1]) for line in header.split("\r\n")
+                           if line.lower().startswith("content-length:")), 0)
+            if length:
+                await reader.readexactly(length)
+            requests[path] += 1
+            content_type, body = bodies.get(path, ("text/plain", b""))
+            cache = "public, max-age=3600, immutable" if path in ("/app.js", "/app.css") else "no-store"
+            writer.write((f"HTTP/1.1 200 OK\r\nContent-Type: {content_type}\r\nCache-Control: {cache}\r\n"
+                          f"Content-Length: {len(body)}\r\nConnection: close\r\n\r\n").encode() + body)
+            await writer.drain()
+        finally:
+            writer.close()
+            await writer.wait_closed()
+
+    async with await asyncio.start_server(respond, "127.0.0.1", 0) as server:
+        port = server.sockets[0].getsockname()[1]
+        async with api.async_playwright() as playwright:
+            browser = await playwright.chromium.launch()
+            try:
+                page = await browser.new_page()
+                failed_images = []
+                page.on("requestfailed", lambda request: failed_images.append(request.resource_type))
+                async with AsyncExitStack() as policies:
+                    if block_visual:
+                        await policies.enter_async_context(_collection_resource_policy(page))
+                    for navigation in range(3):
+                        if navigation == 0:
+                            await page.goto(f"http://127.0.0.1:{port}/", wait_until="load")
+                        else:
+                            async with page.expect_navigation(wait_until="load"):
+                                await page.locator("button").click()
+                        await page.wait_for_function("window.price === 1800")
+                        assert await page.evaluate("window.scriptLoaded") is True
+                        assert await page.evaluate("getComputedStyle(document.body).color") == "rgb(1, 2, 3)"
+                assert requests["/"] == requests["/data"] == 3
+                assert requests["/app.js"] == requests["/app.css"] == 1
+                assert requests["/image.png"] == (0 if block_visual else 3)
+                assert failed_images.count("image") == (3 if block_visual else 0)
+                # 정책 종료 뒤에도 페이지를 재사용할 수 있고 차단도 해제된다.
+                await page.goto(f"http://127.0.0.1:{port}/", wait_until="load")
+                assert requests["/image.png"] == (1 if block_visual else 4)
+            finally:
+                await browser.close()
 
 
 @pytest.mark.asyncio
@@ -75,15 +171,14 @@ async def test_html_results_wait_for_data_instead_of_unrelated_image(mode, block
         browser = await playwright.chromium.launch()
         try:
             context = await browser.new_context()
-            if block_visual:
-                await context.route("**/*", _route_collection_resource)
             page = await context.new_page()
 
             async def respond(route):
                 if route.request.url.endswith("/slow-image.png"):
                     image_requested.set()
                     if block_visual:
-                        await route.fallback()
+                        # 모의 문서 응답과의 대기 계약. 실제 CDP 차단·캐시는 별도 HTTP 테스트로 확인한다.
+                        await route.abort("blockedbyclient")
                         return
                     await release_image.wait()
                     await route.fulfill(content_type="image/png", body=b"")

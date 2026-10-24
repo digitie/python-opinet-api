@@ -1,5 +1,11 @@
 # Changelog
 
+## 2026-10-24 — 시각 자원 차단 중 HTTP 캐시 유지
+
+- Playwright 요청 라우팅 대신 Chromium CDP의 Image·Font·Media 요청만 차단해 JS·CSS 캐시를 유지한다.
+- 초기 GET·반복 form POST에서도 스크립트·스타일·가격 fetch가 정상이고 JS·CSS 다운로드는
+  한 번인지 실제 Chromium과 로컬 HTTP 서버로 검증한다. 전국30분 목표는 운영 미측정 상태다.
+
 ## 2026-10-24 — 체크포인트 작성자 경합 구분
 
 - 실제 SQLite BUSY/LOCKED만 공개 `OpinetCheckpointBusyError`로 구분한다.
@@ -11,7 +17,7 @@
 - 시군구 선택이 이미 보낸 정상 조회 POST의 지역·탭·검색 모드·필터를 검증해 결과를
   재사용하고 중복 버튼 조회를 줄인다. 지역 AJAX 목록과 실제 옵션의 일치를 확인한다.
 - image/font/media만 제외하고 HTML 문서 완료·선택 지역·활성 탭 검증을 유지해
-  load handler의 동적 추가 행도 보존한다. HTTP 캐시 비활성화 비용은 실측으로 확인한다.
+  load handler의 동적 추가 행도 보존한다. 후속 보완에서 HTTP 캐시도 유지한다.
 - 30분은 실제 전국 실행으로 검증할 목표이며 미검증 속도 향상률을 보장하지 않는다.
 
 ## 2026-10-24 — 지역 체크포인트와 저장 재개

@@ -436,16 +436,33 @@ async def test_default_action_delays_remain_random_and_bounded():
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("kind", ["image", "font", "media", "document", "script", "stylesheet", "xhr", "fetch", "other"])
-async def test_browser_resource_policy_keeps_scripts_and_price_data(kind):
-    route = SimpleNamespace(request=SimpleNamespace(resource_type=kind), abort=AsyncMock(), continue_=AsyncMock())
-    await browser_module._route_collection_resource(route)
-    if kind in {"image", "font", "media"}:
-        route.abort.assert_awaited_once_with("blockedbyclient")
-        route.continue_.assert_not_awaited()
+@pytest.mark.parametrize("closed,error", [(False, False), (True, True), (False, True)])
+async def test_browser_resource_policy_preserves_cache_and_drains_tasks(closed, error):
+    handlers = {}
+    session = SimpleNamespace(send=AsyncMock(), detach=AsyncMock(),
+                              on=lambda event, handler: handlers.update({event: handler}),
+                              remove_listener=lambda event, handler: handlers.pop(event))
+    page = SimpleNamespace(context=SimpleNamespace(new_cdp_session=AsyncMock(return_value=session)),
+                           is_closed=lambda: closed)
+    async def exercise():
+        async with browser_module._collection_resource_policy(page):
+            session.send.assert_awaited_once_with("Fetch.enable", {"patterns": [
+                {"resourceType": kind, "requestStage": "Request"} for kind in ("Image", "Font", "Media")
+            ]})
+            if error:
+                session.send.side_effect = RuntimeError("CDP failure")
+            handlers["Fetch.requestPaused"]({"requestId": "visual"})
+            await asyncio.sleep(0)
+            session.send.side_effect = None
+    if error and not closed:
+        with pytest.raises(OpinetServerError, match="resource policy failed"):
+            await exercise()
     else:
-        route.continue_.assert_awaited_once_with()
-        route.abort.assert_not_awaited()
+        await exercise()
+    assert not handlers
+    assert session.detach.await_count == (0 if closed else 1)
+    assert any(call.args == ("Fetch.failRequest", {"requestId": "visual", "errorReason": "BlockedByClient"})
+               for call in session.send.await_args_list)
 
 
 @pytest.mark.parametrize("payload", [None, [], {}, {"result": {}}, {"result": [None]}, {"result": [{}]}, {"result": [{"SIGUNGU_NM": " "}]}])
@@ -1168,6 +1185,13 @@ async def test_browser_wait_and_collect_once_lifecycle(monkeypatch, region):
     class FakePage:
         url = "https://www.opinet.co.kr/searRgSelect.do"
 
+        @property
+        def context(self):
+            return FakeContext()
+
+        def is_closed(self):
+            return False
+
         async def goto(self, url, **kwargs):
             entered.append((url, kwargs))
             return _FakeResponse(url, content_type="text/html")
@@ -1176,9 +1200,9 @@ async def test_browser_wait_and_collect_once_lifecycle(monkeypatch, region):
             pass
 
     class FakeContext:
-        async def route(self, pattern, handler):
-            assert pattern == "**/*"
-            assert handler is browser_module._route_collection_resource
+        async def new_cdp_session(self, page):
+            return SimpleNamespace(send=AsyncMock(), detach=AsyncMock(), on=lambda *args: None,
+                                   remove_listener=lambda *args: None)
 
         async def new_page(self):
             return FakePage()

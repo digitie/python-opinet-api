@@ -1,5 +1,9 @@
 # python-opinet-api Implementation Status
 
+시각 자원 차단은 Chromium CDP `Fetch`의 Image·Font·Media 타입에만 적용한다. HTTP 캐시를
+끄는 Playwright 요청 라우팅을 제거했다. 로컬 HTTP 서버와 실제 Chromium에서 초기 GET·
+반복 POST의 JS·CSS 캐시 재사용과 가격 fetch·스크립트 실행·스타일 적용을 검증한다.
+
 체크포인트 작성자 경합은 `OpinetCheckpointBusyError`로 구분한다. 호출자는 진행 중인
 다른 수집기를 기다리는 상태로 처리할 수 있다. SQLite I/O·파일 오류는 경합으로 바꾸지 않는다.
 

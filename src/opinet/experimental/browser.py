@@ -14,8 +14,8 @@ import logging
 import random
 import time
 from collections import deque
-from collections.abc import Awaitable, Callable, Mapping, Sequence
-from contextlib import contextmanager
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
+from contextlib import asynccontextmanager, contextmanager
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta
 from types import MappingProxyType
@@ -264,12 +264,44 @@ async def _reject_blocked_response(response: Any, *, page: Any = None, timeout_m
         raise OpinetServerError("Opinet browser response appears to be an access-block page")
 
 
-async def _route_collection_resource(route: Any) -> None:
-    """가격 파싱에 쓰지 않는 시각 자원만 제외하고 스크립트·데이터는 로드한다."""
-    if route.request.resource_type in {"image", "font", "media"}:
-        await route.abort("blockedbyclient")
-    else:
-        await route.continue_()
+@asynccontextmanager
+async def _collection_resource_policy(page: Any) -> AsyncIterator[None]:
+    """Chromium 캐시는 유지하며 가격 파싱에 쓰지 않는 시각 자원만 제외한다."""
+    session = await page.context.new_cdp_session(page)
+    pending: set[asyncio.Task[Any]] = set()
+    failures: list[BaseException] = []
+
+    async def block(request_id: str) -> None:
+        try:
+            await session.send("Fetch.failRequest", {
+                "requestId": request_id, "errorReason": "BlockedByClient",
+            })
+        except Exception as error:
+            failures.append(error)
+
+    def paused(event: Mapping[str, Any]) -> None:
+        task = asyncio.create_task(block(event["requestId"]))
+        pending.add(task)
+        task.add_done_callback(pending.discard)
+
+    session.on("Fetch.requestPaused", paused)
+    try:
+        await session.send("Fetch.enable", {"patterns": [
+            {"resourceType": kind, "requestStage": "Request"} for kind in ("Image", "Font", "Media")
+        ]})
+        yield
+    finally:
+        session.remove_listener("Fetch.requestPaused", paused)
+        try:
+            if not page.is_closed():
+                await session.send("Fetch.disable")
+        finally:
+            if pending:
+                await asyncio.gather(*pending, return_exceptions=True)
+            if not page.is_closed():
+                await session.detach()
+    if failures and not page.is_closed():
+        raise OpinetServerError("Opinet browser resource policy failed") from failures[0]
 
 
 def _sigungu_options(payload: Any) -> list[list[str]]:
@@ -988,11 +1020,11 @@ class OpinetBrowserCollector:
             try:
                 browser = await playwright.chromium.launch(**launch_options)
                 context = await browser.new_context()
-                await context.route("**/*", _route_collection_resource)
                 page = await context.new_page()
-                await self._open_search_page(page)
-                await self._pause(page)
-                return await self._collect_page(page, checkpoint) if checkpoint is not None else await self.collect_page(page)
+                async with _collection_resource_policy(page):
+                    await self._open_search_page(page)
+                    await self._pause(page)
+                    return await self._collect_page(page, checkpoint) if checkpoint is not None else await self.collect_page(page)
             finally:
                 if context is not None:
                     try:
