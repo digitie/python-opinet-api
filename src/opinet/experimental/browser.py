@@ -22,7 +22,7 @@ from types import MappingProxyType
 from pathlib import Path
 from typing import Any, Literal, TypeAlias
 from typing import Iterator
-from urllib.parse import urlsplit
+from urllib.parse import parse_qs, urlsplit
 from zoneinfo import ZoneInfo
 
 from .._convert import strip_or_none, to_bool_yn, to_float_or_none
@@ -119,6 +119,17 @@ _logger = logging.getLogger(__name__)
 _REGION_LABEL_MAX_CHARS = 12
 _REGION_SEARCH_MAX_ATTEMPTS = 2
 _TAB_SELECTORS: dict[BrowserStationKind, str] = {"station": "#OS_BTN", "lpg": "#LPG_BTN"}
+_TAB_READY_JS = """({selector, kind}) => {
+    const node = document.querySelector(selector);
+    if (!node) return false;
+    const active = node.getAttribute('aria-selected') === 'true' ||
+        ['on', 'active', 'selected', 'sel'].some(name => node.classList.contains(name)) ||
+        node.closest('li')?.classList.contains('sel');
+    const mode = document.querySelector('#BTN_DIV');
+    const fuel = document.querySelector('#LPG_YN');
+    return Boolean(active) && (!mode || mode.value === (kind === 'lpg' ? 'lpg_btn' : 'os_btn')) &&
+        (!fuel || (kind === 'lpg' ? fuel.value === 'Y' : fuel.value !== 'Y'));
+}"""
 
 
 class _BrowserActionTimeoutError(OpinetServerError):
@@ -214,10 +225,10 @@ async def _reject_blocked_response(response: Any, *, page: Any = None, timeout_m
     if callable(header_value):
         content_type = (await header_value("content-type") or "").lower()
     if "html" not in content_type:
-        return
+        return None
     text_method = getattr(response, "text", None)
     if not callable(text_method):
-        return
+        return None
     try:
         body = await text_method()
     except Exception as exc:
@@ -251,6 +262,44 @@ async def _reject_blocked_response(response: Any, *, page: Any = None, timeout_m
         raise OpinetServerError("Opinet browser returned a service-unavailable page")
     if any(marker in body for marker in _BLOCKED_PAGE_MARKERS):
         raise OpinetServerError("Opinet browser response appears to be an access-block page")
+
+
+async def _route_collection_resource(route: Any) -> None:
+    """가격 파싱에 쓰지 않는 시각 자원만 제외하고 스크립트·데이터는 로드한다."""
+    if route.request.resource_type in {"image", "font", "media"}:
+        await route.abort("blockedbyclient")
+    else:
+        await route.continue_()
+
+
+def _sigungu_options(payload: Any) -> list[list[str]]:
+    """공개 sigunguGisAjax·sigunguGisResult0의 응답/옵션 계약을 적용한다."""
+    rows = payload.get("result") if isinstance(payload, Mapping) else None
+    if not isinstance(rows, list):
+        raise OpinetServerError("Opinet sigungu response must contain a result array")
+    result = []
+    for row in rows:
+        name = strip_or_none(row.get("SIGUNGU_NM")) if isinstance(row, Mapping) else None
+        if name is None:
+            raise OpinetServerError("Opinet sigungu response contains an invalid name")
+        result.append([name, name])
+    return result
+
+
+def _automatic_sigungu_result(page: Any, response: Any, region: BrowserRegion, kind: BrowserStationKind) -> bool:
+    """정상 지역 선택 UI가 이미 보낸 동일 검색의 문서 응답만 재사용한다."""
+    if region.dong_value or response is None or not _is_post_response(response, _PAGE_ENDPOINT):
+        return False
+    request = response.request
+    navigation = getattr(request, "is_navigation_request", None)
+    if not callable(navigation) or not navigation() or request.frame != page.main_frame:
+        return False
+    fields = parse_qs(request.post_data or "", keep_blank_values=True)
+    expected = {"SIDO_NM0": region.sido_value, "SIDO_NM": region.sido_value,
+                "SIGUNGU_NM0": region.sigungu_value, "SIGUNGU_NM": region.sigungu_value,
+                "DONG_NM": "", "SEARCH_MOD": "addr", "OS_NM": "", "OS_ADDR": "",
+                "BTN_DIV": "lpg_btn" if kind == "lpg" else "os_btn", "LPG_YN": "Y" if kind == "lpg" else ""}
+    return all(fields.get(name) == [value] for name, value in expected.items())
 
 
 @contextmanager
@@ -587,8 +636,8 @@ class OpinetBrowserSnapshot:
 class OpinetBrowserThrottle:
     """화면 조작과 전체 실행 사이의 부하 분산 정책."""
 
-    action_min_seconds: float = 0.25
-    action_max_seconds: float = 1.25
+    action_min_seconds: float = 0.05
+    action_max_seconds: float = 0.15
     run_interval_min: timedelta = timedelta(hours=8)
     run_interval_max: timedelta = timedelta(hours=8)
     max_runs_per_24h: int = 3
@@ -939,6 +988,7 @@ class OpinetBrowserCollector:
             try:
                 browser = await playwright.chromium.launch(**launch_options)
                 context = await browser.new_context()
+                await context.route("**/*", _route_collection_resource)
                 page = await context.new_page()
                 await self._open_search_page(page)
                 await self._pause(page)
@@ -1080,11 +1130,7 @@ class OpinetBrowserCollector:
 
     async def _activate_tab(self, page: Any, *, station_kind: BrowserStationKind, selector: str) -> None:
         locator = page.locator(selector)
-        class_name = (await locator.get_attribute("class") or "").lower()
-        aria_selected = await locator.get_attribute("aria-selected")
-        is_active = aria_selected == "true" or bool(
-            {"on", "active", "selected"}.intersection(class_name.split())
-        )
+        is_active = await page.evaluate(_TAB_READY_JS, arg={"selector": selector, "kind": station_kind})
         if not is_active:
             with _observe_browser_action(page, f"tab:{station_kind}"):
                 async with page.expect_response(
@@ -1104,10 +1150,25 @@ class OpinetBrowserCollector:
             timeout=self.timeout_ms,
         )
 
-    async def _wait_for_results_dom(self, page: Any) -> None:
+    async def _wait_for_results_dom(
+        self, page: Any, *,
+        previous_document: float | None = None, region: BrowserRegion | None = None,
+        station_kind: BrowserStationKind = "station",
+    ) -> None:
+        # load handler가 추가하는 행까지 기다리고 빈 결과에도 지역·탭을 확인한다.
         await page.wait_for_function(
-            "() => document.readyState === 'complete' && "
-            "document.querySelector('table.tbl_type10') !== null",
+            "({previous, values, tab, kind}) => { "
+            "if (previous !== null && performance.timeOrigin === previous) return false; "
+            "if (document.readyState !== 'complete') return false; "
+            "if (!document.querySelector('table.tbl_type10')) return false; "
+            "if (!values.every(([selector, value]) => document.querySelector(selector)?.value === value)) return false; "
+            "const matchesTab = " + _TAB_READY_JS + "; "
+            "if (tab && !matchesTab({selector: tab, kind})) return false; "
+            "return true; }",
+            arg={"previous": previous_document,
+                 "values": [["#SIDO_NM0", region.sido_value], ["#SIGUNGU_NM0", region.sigungu_value],
+                            ["#DONG_NM", region.dong_value or ""]] if region is not None else [],
+                 "tab": _TAB_SELECTORS[station_kind] if region is not None else None, "kind": station_kind},
             timeout=self.timeout_ms,
         )
 
@@ -1194,17 +1255,20 @@ class OpinetBrowserCollector:
                     result.append((value, name))
         return tuple(result)
 
-    async def _select_value(self, page: Any, selector: str, value: str, *, parent: str | None = None) -> None:
+    async def _select_value(self, page: Any, selector: str, value: str, *, parent: str | None = None) -> Any:
         locator = page.locator(selector)
         current = await locator.input_value()
         if current == value:
             return
         region_endpoints = _REGION_ENDPOINTS_BY_SELECTOR.get(selector)
         dependent_selector = _DEPENDENT_SELECTOR_BY_SELECTOR.get(selector)
+        response = None
+        expected = None
+        origin = await page.evaluate("() => performance.timeOrigin") if dependent_selector is not None else None
+        navigation = False
         if region_endpoints is None:
             await locator.select_option(value=value)
         else:
-            # 숫자 지역 코드 또는 정제·절단한 지역 이름만 진단에 포함한다. 임의 문자열·URL은 기록하지 않는다.
             target = _region_label(value) if parent is None else f"{_region_label(parent)}/{_region_label(value)}"
             with _observe_browser_action(page, f"select:{selector}:target={target}"):
                 async with page.expect_response(
@@ -1218,18 +1282,27 @@ class OpinetBrowserCollector:
                 raise OpinetServerError("unexpected Opinet region response URL")
             _validate_response(response, response_endpoint)
             await _reject_blocked_response(response, page=page, timeout_ms=self.timeout_ms)
+            await asyncio.wait_for(response.body(), timeout=self.timeout_ms / 1000)
+            if response_endpoint == "sigunguGisSelect.do":
+                expected = _sigungu_options(await response.json())
+            is_navigation = getattr(response.request, "is_navigation_request", None)
+            navigation = callable(is_navigation) and is_navigation()
         await self._pause(page)
         if dependent_selector is not None:
             await page.wait_for_function(
-                "({selector, value, dependent}) => { "
-                "const current = document.querySelector(selector); "
-                "const next = document.querySelector(dependent); "
-                "return current !== null && current.value === value && "
-                "next !== null && (dependent === '#DONG_NM' || "
-                "Array.from(next.options).some(option => option.value.trim() !== '')); }",
-                arg={"selector": selector, "value": value, "dependent": dependent_selector},
+                "({selector, value, dependent, expected, origin, navigation}) => { "
+                "const current = document.querySelector(selector); const next = document.querySelector(dependent); "
+                "if (!current || current.value !== value || !next) return false; "
+                "if (navigation && (performance.timeOrigin === origin || document.readyState !== 'complete')) return false; "
+                "if (Array.isArray(expected)) { const actual = Array.from(next.options) "
+                ".filter(o => o.value.trim() !== '').map(o => [o.value.trim(), o.textContent.trim()]); "
+                "return JSON.stringify(actual) === JSON.stringify(expected); } "
+                "return dependent === '#DONG_NM' || Array.from(next.options).some(o => o.value.trim() !== ''); }",
+                arg={"selector": selector, "value": value, "dependent": dependent_selector, "expected": expected,
+                     "origin": origin, "navigation": navigation},
                 timeout=self.timeout_ms,
             )
+        return response
 
     async def _discover_regions(self, page: Any) -> list[BrowserRegion]:
         regions: list[BrowserRegion] = []
@@ -1409,7 +1482,8 @@ class OpinetBrowserCollector:
     ) -> tuple[BrowserStation, ...]:
         selection_started = time.monotonic()
         await self._select_value(page, "#SIDO_NM0", region.sido_value)
-        await self._select_value(page, "#SIGUNGU_NM0", region.sigungu_value, parent=region.sido_value)
+        previous_document = await page.evaluate("() => performance.timeOrigin")
+        selection_response = await self._select_value(page, "#SIGUNGU_NM0", region.sigungu_value, parent=region.sido_value)
         await self._select_value(page, "#DONG_NM", region.dong_value or "")
         for selector, expected in (
             ("#SIDO_NM0", region.sido_value),
@@ -1427,14 +1501,18 @@ class OpinetBrowserCollector:
         self._phase_seconds["selection"] += response_started - selection_started
 
         phase = f"search:{station_kind}:region={_region_path_label(region)}:attempt={attempt}"
-        with _observe_browser_action(page, phase, timeout_error=_SearchResponseTimeoutError):
-            async with page.expect_response(
-                lambda response: _is_post_response(response, _SEARCH_ENDPOINT)
-                or _is_post_response(response, _PAGE_ENDPOINT),
-                timeout=self.timeout_ms,
-            ) as response_info:
-                await page.get_by_role("link", name="조회", exact=True).click(timeout=self.timeout_ms)
-        response = await response_info.value
+        if self.query_level == "sigungu" and _automatic_sigungu_result(page, selection_response, region, station_kind):
+            response = selection_response
+        else:
+            previous_document = await page.evaluate("() => performance.timeOrigin")
+            with _observe_browser_action(page, phase, timeout_error=_SearchResponseTimeoutError):
+                async with page.expect_response(
+                    lambda response: _is_post_response(response, _SEARCH_ENDPOINT)
+                    or _is_post_response(response, _PAGE_ENDPOINT),
+                    timeout=self.timeout_ms,
+                ) as response_info:
+                    await page.get_by_role("link", name="조회", exact=True).click(timeout=self.timeout_ms)
+            response = await response_info.value
         results_started = time.monotonic()
         self._phase_seconds["response"] += results_started - response_started
         response_endpoint = _SEARCH_ENDPOINT if _has_endpoint(str(response.url), _SEARCH_ENDPOINT) else _PAGE_ENDPOINT
@@ -1452,7 +1530,11 @@ class OpinetBrowserCollector:
                 query_level=self.query_level,
             )
         else:
-            await self._wait_for_results_dom(page)
+            is_navigation = getattr(response.request, "is_navigation_request", None)
+            await self._wait_for_results_dom(
+                page, region=region, station_kind=station_kind,
+                previous_document=previous_document if callable(is_navigation) and is_navigation() else None,
+            )
             found = await self._read_dom_stations(page, region=region, station_kind=station_kind)
         self._phase_seconds["results"] += time.monotonic() - results_started
         return found
