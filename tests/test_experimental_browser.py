@@ -633,6 +633,39 @@ def replace_region(region, **changes):
     return BrowserRegion(**values)
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("finish_body", [True, False])
+async def test_region_selection_waits_for_body_after_response_headers(finish_body):
+    headers_received = asyncio.Event()
+    body_received = asyncio.Event()
+
+    class StreamingResponse(_FakeResponse):
+        async def finished(self):
+            headers_received.set()
+            await body_received.wait()
+
+    class StreamingPage(_FakeRegionPage):
+        def expect_response(self, predicate, timeout):
+            response = StreamingResponse("https://www.opinet.co.kr/common/sigunguGisSelect.do")
+            assert predicate(response)
+            return _FakeResponseContext(response)
+
+        async def wait_for_function(self, _script, **_kwargs):
+            assert body_received.is_set()
+
+    collector = OpinetBrowserCollector(timeout_ms=100,
+        throttle=OpinetBrowserThrottle(action_min_seconds=0, action_max_seconds=0))
+    task = asyncio.create_task(collector._select_value(StreamingPage(), "#SIDO_NM0", "11"))
+    await asyncio.wait_for(headers_received.wait(), 1)
+    assert not task.done()
+    if finish_body:
+        body_received.set()
+        await task
+    else:
+        with pytest.raises(TimeoutError):
+            await task
+
+
 class _FakeResponse:
     def __init__(self, url, payload=None, content_type="application/json", status=200, text_body=""):
         self.url = url
@@ -641,6 +674,9 @@ class _FakeResponse:
         self.status = status
         self.text_body = text_body
         self.request = SimpleNamespace(method="POST")
+
+    async def finished(self):
+        return None
 
     async def header_value(self, _name):
         return self.content_type

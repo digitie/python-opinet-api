@@ -44,7 +44,7 @@ async def test_tab_get_response_mismatch_reports_phase_without_retry():
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("mode", ["server", "dynamic", "empty", "wrong-region", "wrong-tab"])
+@pytest.mark.parametrize("mode", ["server", "dynamic", "empty", "wrong-region", "wrong-tab", "empty-wrong-region", "empty-wrong-tab"])
 async def test_html_results_wait_for_data_instead_of_unrelated_image(mode):
     api = pytest.importorskip("playwright.async_api", reason="browser extra가 필요한 검증")
     region = BrowserRegion(sido_value="11", sido_name="서울", sigungu_value="110", sigungu_name="테스트구")
@@ -53,12 +53,12 @@ async def test_html_results_wait_for_data_instead_of_unrelated_image(mode):
     link = '<tr><td><a href="' + html.escape(href, quote=True) + '">테스트</a></td></tr>'
 
     def document(*, result=False):
-        wrong_region = result and mode == "wrong-region"
+        wrong_region = result and mode.endswith("wrong-region")
         controls = ('<select id="SIDO_NM0"><option value="11">서울</option></select>'
                     '<select id="SIGUNGU_NM0"><option value="' + ("999" if wrong_region else "110") + '">구</option></select>'
                     '<select id="DONG_NM"><option value="">전체</option></select>'
-                    '<button id="OS_BTN" class="' + ("" if result and mode == "wrong-tab" else "on") + '">주유소</button>')
-        body = link if result and mode not in ("dynamic", "empty") else ""
+                    '<button id="OS_BTN" class="' + ("" if result and mode.endswith("wrong-tab") else "on") + '">주유소</button>')
+        body = link if result and mode != "dynamic" and not mode.startswith("empty") else ""
         dynamic = ('<script>window.addEventListener("load", () => { document.querySelector("tbody").innerHTML = '
                    + json.dumps(link) + '; });</script>') if result and mode == "dynamic" else ""
         return (controls + '<form method="post" action="/searRgSelect.do"><a href="#" '
@@ -96,7 +96,8 @@ async def test_html_results_wait_for_data_instead_of_unrelated_image(mode):
                 assert [station.station_id for station in stations] == ["A0000001"]
                 assert stations[0].price_by_product
                 assert await page.evaluate("document.readyState") == "interactive"
-            elif mode in ("wrong-region", "wrong-tab"):
+            elif "wrong" in mode:
+                release_image.set()
                 with pytest.raises(Exception, match="Timeout"):
                     await task
             else:

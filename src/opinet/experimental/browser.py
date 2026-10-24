@@ -1144,30 +1144,28 @@ class OpinetBrowserCollector:
         rendered = _ServerResultLinks()
         if response_body is not None:
             rendered.feed(response_body)
-        if rendered.links and not rendered.has_dynamic_fields and previous_document is not None and region is not None:
-            # 새 문서·선택값·응답에 있던 모든 원본 필드의 일치를 확인한다. 이미지·지도
-            # load가 늦어도 이미 완성된 결과를 읽는다. 빈/동적 결과는 아래 기존 대기를 쓴다.
-            await page.wait_for_function(
-                "({previous, values, links, tab}) => { "
-                "if (performance.timeOrigin === previous || document.readyState === 'loading') return false; "
-                "if (!values.every(([selector, value]) => document.querySelector(selector)?.value === value)) return false; "
-                "const active = document.querySelector(tab); "
-                "if (!active || !(active.getAttribute('aria-selected') === 'true' || "
-                "['on', 'active', 'selected'].some(name => active.classList.contains(name)))) return false; "
-                "const actual = new Set(Array.from(document.querySelectorAll('table.tbl_type10 a'), "
-                "a => a.getAttribute('href')).filter(href => href && "
-                "(href.startsWith('javascript:fn_osPop(') || href.startsWith('javascript:fnVolatInfowindow(')))); "
-                "return actual.size === links.length && links.every(link => actual.has(link)); }",
-                arg={"previous": previous_document,
-                     "values": [["#SIDO_NM0", region.sido_value], ["#SIGUNGU_NM0", region.sigungu_value],
-                                ["#DONG_NM", region.dong_value or ""]],
-                     "links": sorted(rendered.links), "tab": _TAB_SELECTORS[station_kind]},
-                timeout=self.timeout_ms,
-            )
-            return
+        fast = bool(rendered.links and not rendered.has_dynamic_fields
+                    and previous_document is not None and region is not None)
+        # 새 문서·선택값·탭은 빈 결과에도 확인한다. 원본 링크 증거가 있는 경우만
+        # 이미지·지도 load를 기다리지 않고 완성된 결과를 읽는다.
         await page.wait_for_function(
-            "() => document.readyState === 'complete' && "
-            "document.querySelector('table.tbl_type10') !== null",
+            "({previous, values, links, tab, fast}) => { "
+            "if (previous !== null && performance.timeOrigin === previous) return false; "
+            "if (fast ? document.readyState === 'loading' : document.readyState !== 'complete') return false; "
+            "if (!document.querySelector('table.tbl_type10')) return false; "
+            "if (!values.every(([selector, value]) => document.querySelector(selector)?.value === value)) return false; "
+            "if (tab) { const active = document.querySelector(tab); "
+            "if (!active || !(active.getAttribute('aria-selected') === 'true' || "
+            "['on', 'active', 'selected'].some(name => active.classList.contains(name)))) return false; } "
+            "if (!fast) return true; "
+            "const actual = new Set(Array.from(document.querySelectorAll('table.tbl_type10 a'), "
+            "a => a.getAttribute('href')).filter(href => href && "
+            "(href.startsWith('javascript:fn_osPop(') || href.startsWith('javascript:fnVolatInfowindow(')))); "
+            "return actual.size === links.length && links.every(link => actual.has(link)); }",
+            arg={"previous": previous_document, "fast": fast,
+                 "values": [["#SIDO_NM0", region.sido_value], ["#SIGUNGU_NM0", region.sigungu_value],
+                            ["#DONG_NM", region.dong_value or ""]] if region is not None else [],
+                 "links": sorted(rendered.links), "tab": _TAB_SELECTORS[station_kind] if region is not None else None},
             timeout=self.timeout_ms,
         )
 
@@ -1278,6 +1276,9 @@ class OpinetBrowserCollector:
                 raise OpinetServerError("unexpected Opinet region response URL")
             _validate_response(response, response_endpoint)
             await _reject_blocked_response(response, page=page, timeout_ms=self.timeout_ms)
+            # expect_response는 헤더 수신 시점이다. 짧은 랜덤 대기 전에 본문까지
+            # 받아야 하위 목록 갱신이 느린 응답을 이전 옵션으로 오인하지 않는다.
+            await asyncio.wait_for(response.finished(), timeout=self.timeout_ms / 1000)
         await self._pause(page)
         if dependent_selector is not None:
             await page.wait_for_function(
