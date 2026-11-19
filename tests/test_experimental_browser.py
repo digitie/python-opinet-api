@@ -1645,3 +1645,81 @@ async def test_browser_region_discovery_logs_each_sido(caplog):
     lines = [r.getMessage() for r in caplog.records if r.getMessage().startswith("Opinet browser region discovery progress:")]
     assert len(lines) == 1
     assert lines[0].startswith("Opinet browser region discovery progress: sido=11 done=1/1 sigungu=1 regions=")
+
+
+class _AutoPostPausePage(_FakeSearchPage):
+    """실제 선택 helper를 통과하고 선택 POST·조회 버튼·DOM guard를 기록한다."""
+
+    def __init__(self, region, kind, *, mismatch=None, same=False):
+        row = _row()
+        values = [row.get(field, "") for field in browser_module._OS_POP_FIELDS]
+        href = "javascript:fn_osPop(" + ",".join(repr(value) for value in values) + ");"
+        response = _FakeResponse("https://www.opinet.co.kr/searRgSelect.do", content_type="text/html")
+        super().__init__(response, records=[{"href": href}])
+        self.set_region(region)
+        if not same:
+            self.selectors["#SIGUNGU_NM0"].current = ""
+        self.main_frame = object()
+        fields = {"SIDO_NM0": region.sido_value, "SIDO_NM": region.sido_value,
+                  "SIGUNGU_NM0": region.sigungu_value, "SIGUNGU_NM": region.sigungu_value,
+                  "DONG_NM": "", "SEARCH_MOD": "addr", "OS_NM": "", "OS_ADDR": "",
+                  "BTN_DIV": "lpg_btn" if kind == "lpg" else "os_btn",
+                  "LPG_YN": "Y" if kind == "lpg" else ""}
+        if mismatch not in {None, "iframe", "duplicates"}:
+            fields[mismatch] = "다름"
+        post_data = urlencode(fields)
+        if mismatch == "duplicates":
+            post_data += "&SIDO_NM0=" + region.sido_value
+        response.request = SimpleNamespace(method="POST", is_navigation_request=lambda: True,
+                                          frame=object() if mismatch == "iframe" else self.main_frame,
+                                          post_data=post_data)
+        self.button = _FakeLocator()
+        self.dom_guards = []
+
+    def get_by_role(self, role, *, name, exact):
+        assert (role, name, exact) == ("link", "조회", True)
+        return self.button
+
+    async def wait_for_function(self, script, **kwargs):
+        self.dom_guards.append((script, kwargs))
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("kind", ["station", "lpg"])
+async def test_automatic_sigungu_post_has_no_phantom_button_pause(region, kind):
+    region = replace(region, dong_value=None, dong_name=None)
+    page = _AutoPostPausePage(region, kind)
+    collector = OpinetBrowserCollector(
+        throttle=OpinetBrowserThrottle(action_min_seconds=0.5, action_max_seconds=0.5))
+    expected = await collector._read_dom_stations(page, region=region, station_kind=kind)
+    actual = await collector._search_region(page, region, station_kind=kind)
+    assert actual == expected
+    assert len(actual) == 1 and actual[0].station_id == "A0000001"
+    assert actual[0].price_by_product[ProductCode.GASOLINE].price == 1815.0
+    assert page.waits == [500]  # 실제 지역 선택의 지연은 남고, 없는 조회 클릭의 지연만 없다.
+    assert page.selectors["#SIGUNGU_NM0"].selected == [region.sigungu_value]
+    assert page.button.clicked == 0
+    results = [call for call in page.dom_guards if "previous" in call[1].get("arg", {})]
+    assert len(results) == 1
+    script, kwargs = results[0]
+    assert "document.readyState !== 'complete'" in script
+    assert kwargs["arg"]["kind"] == kind
+    assert kwargs["arg"]["values"] == [["#SIDO_NM0", region.sido_value],
+                                         ["#SIGUNGU_NM0", region.sigungu_value], ["#DONG_NM", ""]]
+    assert kwargs["arg"]["previous"] == 1.0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mismatch,same", [("OS_NM", False), ("BTN_DIV", False),
+                                         ("iframe", False), ("duplicates", False), (None, True)])
+async def test_sigungu_fallback_keeps_actual_button_pause(region, mismatch, same):
+    region = replace(region, dong_value=None, dong_name=None)
+    page = _AutoPostPausePage(region, "station", mismatch=mismatch, same=same)
+    collector = OpinetBrowserCollector(
+        throttle=OpinetBrowserThrottle(action_min_seconds=0.5, action_max_seconds=0.5))
+    expected = await collector._read_dom_stations(page, region=region, station_kind="station")
+    actual = await collector._search_region(page, region, station_kind="station")
+    assert actual == expected
+    assert page.button.clicked == 1
+    assert page.waits == ([500] if same else [500, 500])
+    assert any("previous" in kwargs.get("arg", {}) for _, kwargs in page.dom_guards)

@@ -1543,12 +1543,17 @@ class OpinetBrowserCollector:
                     f"Opinet browser selected value mismatch for {selector}: "
                     f"expected {expected!r}, got {actual!r}"
                 )
-        await self._pause(page)
+        automatic = self.query_level == "sigungu" and _automatic_sigungu_result(
+            page, selection_response, region, station_kind,
+        )
+        # 자동 조회의 지역 선택은 이미 지연했다. 실제 조회 클릭이 있을 때만 추가 지연한다.
+        if not automatic:
+            await self._pause(page)
         response_started = time.monotonic()
         self._phase_seconds["selection"] += response_started - selection_started
 
         phase = f"search:{station_kind}:region={_region_path_label(region)}:attempt={attempt}"
-        if self.query_level == "sigungu" and _automatic_sigungu_result(page, selection_response, region, station_kind):
+        if automatic:
             response = selection_response
         else:
             previous_document = await page.evaluate("() => performance.timeOrigin")
