@@ -266,7 +266,7 @@ async def _reject_blocked_response(response: Any, *, page: Any = None, timeout_m
 
 
 @asynccontextmanager
-async def _collection_resource_policy(page: Any) -> AsyncIterator[None]:
+async def _collection_resource_policy(page: Any) -> AsyncIterator[Callable[[], Awaitable[None]]]:
     """Chromium 캐시는 유지하며 가격 파싱에 쓰지 않는 시각 자원만 제외한다."""
     session = await page.context.new_cdp_session(page)
     pending: set[asyncio.Task[Any]] = set()
@@ -285,13 +285,28 @@ async def _collection_resource_policy(page: Any) -> AsyncIterator[None]:
         pending.add(task)
         task.add_done_callback(pending.discard)
 
+    def raise_if_failed() -> None:
+        if failures and not page.is_closed():
+            error = failures[0]
+            raise OpinetServerError(
+                "Opinet browser resource policy failed "
+                f"command=Fetch.failRequest cause={type(error).__name__}"
+            ) from error
+
+    async def check() -> None:
+        # 안전한 수집 경계에서 차단 실패를 확인한다. 끝까지 sticky 오류를 묵히지 않는다.
+        async with asyncio.timeout(_RESOURCE_CLEANUP_TIMEOUT_SECONDS):
+            if pending:
+                await asyncio.gather(*pending, return_exceptions=True)
+        raise_if_failed()
+
     session.on("Fetch.requestPaused", paused)
     body_failed = False
     try:
         await session.send("Fetch.enable", {"patterns": [
             {"resourceType": kind, "requestStage": "Request"} for kind in ("Image", "Font", "Media")
         ]})
-        yield
+        yield check
     except BaseException:
         body_failed = True
         raise
@@ -300,10 +315,11 @@ async def _collection_resource_policy(page: Any) -> AsyncIterator[None]:
         try:
             try:
                 async with asyncio.timeout(_RESOURCE_CLEANUP_TIMEOUT_SECONDS):
-                    if not page.is_closed():
-                        await session.send("Fetch.disable")
+                    # 이미 차단 중인 requestId를 Fetch.disable로 먼저 무효화하지 않는다.
                     if pending:
                         await asyncio.gather(*pending, return_exceptions=True)
+                    if not page.is_closed():
+                        await session.send("Fetch.disable")
                     if not page.is_closed():
                         await session.detach()
             finally:
@@ -315,8 +331,7 @@ async def _collection_resource_policy(page: Any) -> AsyncIterator[None]:
             # 정리 실패가 원래 취소·인증/차단 오류를 일반 재시도 오류로 바꾸지 않는다.
             if not body_failed:
                 raise
-    if failures and not page.is_closed():
-        raise OpinetServerError("Opinet browser resource policy failed") from failures[0]
+    raise_if_failed()
 
 
 def _sigungu_options(payload: Any) -> list[list[str]]:
@@ -1036,10 +1051,10 @@ class OpinetBrowserCollector:
                 browser = await playwright.chromium.launch(**launch_options)
                 context = await browser.new_context()
                 page = await context.new_page()
-                async with _collection_resource_policy(page):
+                async with _collection_resource_policy(page) as resource_check:
                     await self._open_search_page(page)
                     await self._pause(page)
-                    return await self._collect_page(page, checkpoint) if checkpoint is not None else await self.collect_page(page)
+                    return await self._collect_page(page, checkpoint, resource_check=resource_check)
             finally:
                 if context is not None:
                     try:
@@ -1070,7 +1085,15 @@ class OpinetBrowserCollector:
         with self._checkpoint() as checkpoint:
             return await self._collect_page(page, checkpoint)
 
-    async def _collect_page(self, page: Any, checkpoint: BrowserCheckpoint | None) -> OpinetBrowserSnapshot:
+    async def _collect_page(
+        self,
+        page: Any,
+        checkpoint: BrowserCheckpoint | None,
+        *,
+        resource_check: Callable[[], Awaitable[None]] | None = None,
+    ) -> OpinetBrowserSnapshot:
+        if resource_check is not None:
+            await resource_check()
         started = time.monotonic()
         self._phase_seconds = dict.fromkeys(self._phase_seconds, 0.0)
         _logger.info("Opinet browser collection started: query_level=%s", self.query_level)
@@ -1117,6 +1140,8 @@ class OpinetBrowserCollector:
             )
             tab_ready = False
             for index, region in enumerate(query_regions, start=1):
+                if resource_check is not None:
+                    await resource_check()
                 found = completed.get((station_kind, index - 1))
                 region_retried = False
                 if found is None:
@@ -1127,6 +1152,8 @@ class OpinetBrowserCollector:
                         page, region, station_kind=station_kind, retry_allowed=retry_budget > 0,
                         checkpoint=checkpoint,
                     )
+                    if resource_check is not None:
+                        await resource_check()
                     if checkpoint is not None:
                         checkpoint.save(checkpoint.key(station_kind, region), found, retried=region_retried)
                 if region_retried:
@@ -1160,6 +1187,8 @@ class OpinetBrowserCollector:
             _logger.info("Opinet browser cumulative phases: selection=%.1fs response=%.1fs results=%.1fs",
                          self._phase_seconds["selection"], self._phase_seconds["response"], self._phase_seconds["results"])
 
+        if resource_check is not None:
+            await resource_check()
         _logger.info(
             "Opinet browser collection finished: regions=%d stations=%d retries=%d elapsed=%.0fs",
             len(regions),

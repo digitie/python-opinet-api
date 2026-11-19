@@ -295,3 +295,119 @@ async def test_sigungu_auto_query_is_reused_only_for_the_same_unfiltered_request
             assert posts[-1]["SIGUNGU_NM0"] == ["110"]
         finally:
             await browser.close()
+
+
+@pytest.mark.asyncio
+async def test_resource_policy_drains_visual_command_before_disabling_fetch(monkeypatch):
+    """실제 CDP에서 body 종료와 늦은 차단 명령이 겹쳐도 Fetch를 먼저 끄지 않는다."""
+    api = pytest.importorskip("playwright.async_api", reason="browser extra가 필요한 검증")
+    async with api.async_playwright() as playwright:
+        browser = await playwright.chromium.launch()
+        entered = asyncio.Event()
+        release = asyncio.Event()
+        try:
+            page = await browser.new_page()
+            new_session = page.context.new_cdp_session
+            session = await new_session(page)
+            original_send = session.send
+            commands = []
+            blocked = []
+            page.on("requestfailed", lambda request: blocked.append(request.failure))
+
+            async def delayed_send(method, params=None):
+                if method == "Fetch.failRequest":
+                    entered.set()
+                    await release.wait()
+                result = await original_send(method, params)
+                commands.append(method)
+                return result
+
+            monkeypatch.setattr(session, "send", delayed_send)
+
+            async def existing_session(_page):
+                return session
+
+            monkeypatch.setattr(page.context, "new_cdp_session", existing_session)
+            async with _collection_resource_policy(page):
+                await page.set_content(
+                    '<img src="http://127.0.0.1:1/unused.png">',
+                    wait_until="domcontentloaded",
+                )
+                await asyncio.wait_for(entered.wait(), 3)
+                # 정책 종료와 겹치는 실제 protocol roundtrip만 지연한다.
+                asyncio.get_running_loop().call_later(0.05, release.set)
+            assert commands.index("Fetch.failRequest") < commands.index("Fetch.disable")
+            await page.wait_for_timeout(20)
+            assert any(reason and "ERR_BLOCKED_BY_CLIENT" in reason for reason in blocked)
+            assert not page.is_closed()
+            # 정리 후 같은 페이지에서 새 CDP session을 붙였다 떼어도 정상이다.
+            next_session = await new_session(page)
+            await next_session.send("Fetch.enable", {"patterns": []})
+            await next_session.send("Fetch.disable")
+            await next_session.detach()
+        finally:
+            release.set()
+            await browser.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mode", ["detached", "navigation"])
+async def test_resource_policy_real_protocol_failure_stops_before_region_crawl(monkeypatch, mode):
+    """실제 protocol 오류를 숨기지 않고 원인 chain과 함께 첫 안전 경계에서 실패한다."""
+    api = pytest.importorskip("playwright.async_api", reason="browser extra가 필요한 검증")
+    async with api.async_playwright() as playwright:
+        browser = await playwright.chromium.launch()
+        entered = asyncio.Event()
+        release = asyncio.Event()
+        caught = []
+        discovered = []
+        try:
+            page = await browser.new_page()
+            session = await page.context.new_cdp_session(page)
+            send = session.send
+
+            async def delayed_send(method, params=None):
+                if method == "Fetch.failRequest":
+                    entered.set()
+                    await release.wait()
+                try:
+                    return await send(method, params)
+                except Exception as error:
+                    if method == "Fetch.failRequest":
+                        caught.append(error)
+                    raise
+
+            monkeypatch.setattr(session, "send", delayed_send)
+
+            async def existing_session(_page):
+                return session
+
+            monkeypatch.setattr(page.context, "new_cdp_session", existing_session)
+            collector = OpinetBrowserCollector()
+
+            async def forbidden_discovery(_page):
+                discovered.append(True)
+                raise AssertionError("policy 실패 뒤 지역 crawl을 시작하면 안 된다")
+
+            monkeypatch.setattr(collector, "_discover_regions", forbidden_discovery)
+            with pytest.raises(OpinetServerError, match="command=Fetch.failRequest cause=") as raised:
+                async with _collection_resource_policy(page) as check:
+                    await page.set_content(
+                        '<img src="http://127.0.0.1:1/unused.png">',
+                        wait_until="domcontentloaded",
+                    )
+                    await asyncio.wait_for(entered.wait(), 3)
+                    if mode == "detached":
+                        await session.detach()
+                    else:
+                        await page.goto("about:blank")
+                    release.set()
+                    await collector._collect_page(page, None, resource_check=check)
+            assert caught and raised.value.__cause__ is caught[0]
+            assert discovered == []
+            assert not page.is_closed()
+            if mode == "navigation":
+                assert "Invalid InterceptionId" in str(caught[0])
+        finally:
+            release.set()
+            await browser.close()
