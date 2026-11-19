@@ -1,5 +1,24 @@
 # 지역별 웹 화면 수집기
 
+
+## 2026-11-20 CDP 시각 자원 차단 수명
+
+정책 종료는 먼저 새 callback 수신을 끝내고, 이미 생성된 차단 작업을 기다린 뒤
+Fetch.disable과 detach를 수행한다. 순서를 반대로 하면 정상 완료 중에도 늦은
+Fetch.failRequest가 "Fetch domain is not enabled"로 실패한다. 실제 Chromium에서
+차단 전송만 지연하고 본문을 종료하는 회귀가 기존 코드에서는 실패하고 수정 후에는 통과한다.
+
+실제 policy 실패는 숨기지 않는다. 내부 수집의 탐색 전·지역 처리 경계·완료 전에서
+진행 중인 차단을 기존 5초 상한으로 확인하고, 실패하면 안전한 command/예외 클래스와
+원래 cause를 전달한다. 검사가 실패한 지역은 완료 checkpoint로 저장하지 않는다.
+전체 수집의 요청/시간 상한이나 무작위 지연은 늘리지 않는다. 공개 collect_page의 인자는 같다.
+
+별도 실제 Chromium 회귀는 navigation으로 무효화된 ID와 강제 CDP detach를
+숨기지 않고 탐색 전에 실패하는지, context 종료가 기존 취소·인증 오류를 보존하는지 확인한다.
+과거 운영 run은 전체 지역 완료 후 resource policy 오류로 저장이 취소됐지만 내부 CDP
+cause가 없어 같은 종료 경합이라고 단정하지 않는다. 운영 crawl이나 새 provider 요청은
+이 변경의 로컬 검증에 포함하지 않았다. Invalid InterceptionId를 무조건 무시하는 우회도 없다.
+
 ## 2026-11-20 자동 POST 재사용의 조작 대기
 
 시군구 선택의 main-frame POST가 지역·탭·검색 모드·필터 검증을 통과하면 해당 결과를

@@ -2,7 +2,7 @@ import asyncio
 from dataclasses import replace
 from datetime import datetime, timedelta
 import random
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
 from urllib.parse import urlencode
 from types import SimpleNamespace
 
@@ -1286,7 +1286,9 @@ async def test_browser_wait_and_collect_once_lifecycle(monkeypatch, region):
             return False
 
     monkeypatch.setattr(browser_module, "_load_playwright", lambda: lambda: FakePlaywrightContext())
-    monkeypatch.setattr(collector, "collect_page", lambda _page: _async_result(snapshot))
+    monkeypatch.setattr(
+        collector, "_collect_page", lambda _page, _checkpoint, **_kwargs: _async_result(snapshot),
+    )
     result = await collector.collect_once()
     assert result == snapshot
     assert entered[0][0] == collector.url
@@ -1723,3 +1725,37 @@ async def test_sigungu_fallback_keeps_actual_button_pause(region, mismatch, same
     assert page.button.clicked == 1
     assert page.waits == ([500] if same else [500, 500])
     assert any("previous" in kwargs.get("arg", {}) for _, kwargs in page.dom_guards)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("boundary", ["before_discovery", "after_region"])
+async def test_resource_policy_failure_does_not_finish_or_save_partial_checkpoint(monkeypatch, region, boundary):
+    """검증 실패 위치 뒤에는 새 지역/완료 checkpoint로 진행하지 않는다."""
+    collector = OpinetBrowserCollector()
+    error = OpinetServerError("resource policy fixture")
+    searches = []
+    checkpoint = SimpleNamespace(
+        regions=lambda: [region], load=lambda _key: None,
+        key=lambda kind, selected: (kind, selected), save=Mock(), complete=Mock(),
+        meta={"requests": 0, "retry_count": 0},
+    )
+
+    async def check():
+        if boundary == "before_discovery" or searches:
+            raise error
+
+    async def activate(*args, **kwargs):
+        return None
+
+    async def search(*args, **kwargs):
+        searches.append(True)
+        return [], False
+
+    monkeypatch.setattr(collector, "_activate_tab", activate)
+    monkeypatch.setattr(collector, "_search_region_with_retry", search)
+    with pytest.raises(OpinetServerError) as raised:
+        await collector._collect_page(_FakeTabPage(), checkpoint, resource_check=check)
+    assert raised.value is error
+    assert len(searches) == (0 if boundary == "before_discovery" else 1)
+    checkpoint.save.assert_not_called()
+    checkpoint.complete.assert_not_called()
