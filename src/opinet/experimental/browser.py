@@ -1040,30 +1040,57 @@ class OpinetBrowserCollector:
             return await self._collect_browser(checkpoint)
 
     async def _collect_browser(self, checkpoint: BrowserCheckpoint | None) -> OpinetBrowserSnapshot:
+        async with self._browser_page() as (page, resource_check):
+            return await self._collect_page(page, checkpoint, resource_check=resource_check)
+
+    @asynccontextmanager
+    async def open_region_search(
+        self,
+    ) -> AsyncIterator[Callable[[BrowserRegion, BrowserStationKind], Awaitable[tuple[BrowserStation, ...]]]]:
+        """저장된 지역 코드로 필요한 검색만 같은 브라우저에서 한 번씩 조회한다."""
+        if self.query_level != "sigungu":
+            raise ValueError("지역 지정 조회에는 sigungu 검색 수준이 필요합니다.")
+        async with self._browser_page() as (page, resource_check):
+            await self._wait_for_options(page, "#SIDO_NM0")
+            used = 0
+            lock = asyncio.Lock()
+
+            async def search(region: BrowserRegion, kind: BrowserStationKind) -> tuple[BrowserStation, ...]:
+                nonlocal used
+                if not region.sido_value or not region.sigungu_value or region.dong_value:
+                    raise ValueError("시도와 시군구 코드가 필요합니다.")
+                async with lock:
+                    if used >= self.throttle.max_search_requests:
+                        raise OpinetRateLimitError("Opinet browser search request budget exceeded")
+                    used += 1
+                    await resource_check()
+                    await self._activate_tab(page, station_kind=kind, selector=_TAB_SELECTORS[kind])
+                    stations = await self._search_region(page, region, station_kind=kind)
+                    await resource_check()
+                    return stations
+
+            yield search
+
+    @asynccontextmanager
+    async def _browser_page(self) -> AsyncIterator[tuple[Any, Callable[[], Awaitable[None]]]]:
         async_playwright = _load_playwright()
         async with async_playwright() as playwright:
             launch_options: dict[str, Any] = {"headless": self.headless}
             if self.browser_channel is not None:
                 launch_options["channel"] = self.browser_channel
-            browser = None
-            context = None
+            browser = await playwright.chromium.launch(**launch_options)
             try:
-                browser = await playwright.chromium.launch(**launch_options)
                 context = await browser.new_context()
-                page = await context.new_page()
-                async with _collection_resource_policy(page) as resource_check:
-                    await self._open_search_page(page)
-                    await self._pause(page)
-                    return await self._collect_page(page, checkpoint, resource_check=resource_check)
+                try:
+                    page = await context.new_page()
+                    async with _collection_resource_policy(page) as resource_check:
+                        await self._open_search_page(page)
+                        await self._pause(page)
+                        yield page, resource_check
+                finally:
+                    await context.close()
             finally:
-                if context is not None:
-                    try:
-                        await context.close()
-                    finally:
-                        if browser is not None:
-                            await browser.close()
-                elif browser is not None:
-                    await browser.close()
+                await browser.close()
 
     async def _open_search_page(self, page: Any) -> None:
         """검색 화면을 새로 열고 응답 출처·차단 여부·최종 주소를 검증한다."""
