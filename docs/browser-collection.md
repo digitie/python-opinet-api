@@ -180,6 +180,17 @@ timeout 원인의 해결을 뜻하지는 않으며, 실제 수집 복구는 별�
 현재 이 안전 진단 범위는 응답 대기 구간이다. 초기 navigation과 응답 이후 DOM/파싱
 오류까지 같은 진단으로 정제한다는 보장은 없으며, 소비자는 기존 오류 마스킹도 유지해야 한다.
 
+## 저장된 지역을 지정해 가격 조회
+
+시도·시군구 코드가 이미 저장돼 있다면 `OpinetBrowserCollector.open_region_search()`로 한 브라우저에서 필요한 지역과 주유소·충전소 탭만 조회할 수 있습니다. 반환값은 기존 `BrowserStation`이며 조회 상한과 공개 화면 응답 검증을 적용합니다. 이 기능은 실험적 브라우저 수집기에 속합니다.
+
+```python
+async with collector.open_region_search() as search:
+    stations = await search(region, "station")
+```
+
+`region`은 기존 수집 결과에서 보존한 시도·시군구 코드로 만든 `BrowserRegion`입니다. 충전소는 `"lpg"` 탭을 사용합니다. 해당 주유소만 갱신하는 호출자는 결과를 주유소 ID로 대조하고 공급자 가격 시각을 확인해야 합니다. 지역 지정 조회는 전체 수집 체크포인트와 독립적으로 동작합니다.
+
 ## 반복 수집과 부하 분산
 
 기본 `OpinetBrowserThrottle`은 화면 조작 사이에 0.15~0.85초의 무작위 대기를

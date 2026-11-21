@@ -1,4 +1,5 @@
 import asyncio
+from contextlib import asynccontextmanager
 from dataclasses import replace
 from datetime import datetime, timedelta
 import random
@@ -1759,3 +1760,40 @@ async def test_resource_policy_failure_does_not_finish_or_save_partial_checkpoin
     assert len(searches) == (0 if boundary == "before_discovery" else 1)
     checkpoint.save.assert_not_called()
     checkpoint.complete.assert_not_called()
+
+async def test_region_search_reuses_one_page_without_discovery_or_retry(region, monkeypatch):
+    region = replace(region, dong_value=None, dong_name=None)
+    collector = OpinetBrowserCollector(throttle=OpinetBrowserThrottle(max_search_requests=2))
+    page = object()
+    resource_check = AsyncMock()
+    events = []
+
+    @asynccontextmanager
+    async def browser_page():
+        events.append("open")
+        try:
+            yield page, resource_check
+        finally:
+            events.append("closed")
+
+    monkeypatch.setattr(collector, "_browser_page", browser_page)
+    wait = AsyncMock()
+    monkeypatch.setattr(collector, "_wait_for_options", wait)
+    discover = AsyncMock(side_effect=AssertionError("unexpected region discovery"))
+    monkeypatch.setattr(collector, "_discover_regions", discover)
+    activate = AsyncMock()
+    monkeypatch.setattr(collector, "_activate_tab", activate)
+    search = AsyncMock(side_effect=[(), OpinetRateLimitError("provider limit")])
+    monkeypatch.setattr(collector, "_search_region", search)
+    async with collector.open_region_search() as lookup:
+        assert await lookup(region, "station") == ()
+        with pytest.raises(OpinetRateLimitError, match="provider limit"):
+            await lookup(region, "lpg")
+        with pytest.raises(OpinetRateLimitError, match="budget exceeded"):
+            await lookup(region, "station")
+
+    assert events == ["open", "closed"]
+    wait.assert_awaited_once_with(page, "#SIDO_NM0")
+    assert activate.await_count == search.await_count == 2
+    assert [call.kwargs["station_kind"] for call in search.call_args_list] == ["station", "lpg"]
+    discover.assert_not_awaited()
