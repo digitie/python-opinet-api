@@ -12,6 +12,7 @@ import html
 import importlib
 import logging
 import random
+import re
 import time
 from collections import deque
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
@@ -265,19 +266,49 @@ async def _reject_blocked_response(response: Any, *, page: Any = None, timeout_m
         raise OpinetServerError("Opinet browser response appears to be an access-block page")
 
 
+#: Chromium이 이미 폐기한 차단 대상에 대한 Fetch.failRequest 응답.
+_STALE_INTERCEPTION_REASON = "Invalid InterceptionId"
+_PROTOCOL_REASON = re.compile(r"Protocol error \(Fetch\.failRequest\):\s*([A-Za-z][A-Za-z .]{0,79})")
+
+
+def _protocol_reason(error: BaseException) -> str:
+    """CDP 오류 문장에서 URL·헤더 없이 고정 형식의 사유만 꺼낸다(진단용)."""
+    match = _PROTOCOL_REASON.search(str(error))
+    return match.group(1).strip().rstrip(".") if match else "unclassified"
+
+
+def _is_stale_interception(error: BaseException) -> bool:
+    """멈춘 시각 요청이 차단 응답 전에 Chromium에서 사라졌는가.
+
+    문서 이동(지역 검색 POST 등)이 같은 문서의 이미지·글꼴 요청을 취소하면 Chromium은 그
+    interception을 폐기한다. 그 뒤 도착한 ``Fetch.failRequest``는 ``Invalid InterceptionId``로
+    거절되지만, 요청은 Request 단계에서 멈춘 채 버려졌으므로 네트워크로 나가지 않았다. 차단의
+    목적(시각 자원 미전송)은 이미 달성됐다. session 분리·도메인 비활성 같은 다른 protocol 오류는
+    정책 자체가 깨진 것이므로 여기에 포함하지 않는다.
+    """
+    return type(error).__name__ in {"Error", "ProtocolError"} and _protocol_reason(error) == _STALE_INTERCEPTION_REASON
+
+
 @asynccontextmanager
 async def _collection_resource_policy(page: Any) -> AsyncIterator[Callable[[], Awaitable[None]]]:
     """Chromium 캐시는 유지하며 가격 파싱에 쓰지 않는 시각 자원만 제외한다."""
     session = await page.context.new_cdp_session(page)
     pending: set[asyncio.Task[Any]] = set()
     failures: list[BaseException] = []
+    stale = 0
 
     async def block(request_id: str) -> None:
+        nonlocal stale
         try:
             await session.send("Fetch.failRequest", {
                 "requestId": request_id, "errorReason": "BlockedByClient",
             })
         except Exception as error:
+            if _is_stale_interception(error):
+                # 운영(2026-11-11~23)에서 LPG 탭 전환·지역 검색 이동과 겹친 이 경합이 매번 전국 수집을
+                # 실패시켰다. 이미 전송되지 않은 요청이므로 실패로 세지 않고 횟수만 남긴다.
+                stale += 1
+                return
             failures.append(error)
 
     def paused(event: Mapping[str, Any]) -> None:
@@ -290,7 +321,7 @@ async def _collection_resource_policy(page: Any) -> AsyncIterator[Callable[[], A
             error = failures[0]
             raise OpinetServerError(
                 "Opinet browser resource policy failed "
-                f"command=Fetch.failRequest cause={type(error).__name__}"
+                f"command=Fetch.failRequest cause={type(error).__name__} reason={_protocol_reason(error)}"
             ) from error
 
     async def check() -> None:
@@ -331,6 +362,8 @@ async def _collection_resource_policy(page: Any) -> AsyncIterator[Callable[[], A
             # 정리 실패가 원래 취소·인증/차단 오류를 일반 재시도 오류로 바꾸지 않는다.
             if not body_failed:
                 raise
+    if stale:
+        _logger.info("Opinet browser resource policy ignored stale interceptions=%d", stale)
     raise_if_failed()
 
 

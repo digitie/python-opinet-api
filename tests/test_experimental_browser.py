@@ -465,6 +465,53 @@ async def test_browser_resource_policy_preserves_cache_and_drains_tasks(closed, 
                for call in session.send.await_args_list)
 
 
+class Error(Exception):
+    """Playwright `Error`와 같은 이름의 protocol 오류 대역."""
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("reason,fails", [
+    ("Invalid InterceptionId.", False),
+    ("Fetch domain is not enabled", True),
+    ("Session closed. Most likely the page has been closed.", True),
+])
+async def test_browser_resource_policy_tolerates_only_stale_interceptions(reason, fails):
+    handlers = {}
+    session = SimpleNamespace(send=AsyncMock(), detach=AsyncMock(),
+                              on=lambda event, handler: handlers.update({event: handler}),
+                              remove_listener=lambda event, handler: handlers.pop(event))
+    page = SimpleNamespace(context=SimpleNamespace(new_cdp_session=AsyncMock(return_value=session)),
+                           is_closed=lambda: False)
+
+    async def exercise():
+        async with browser_module._collection_resource_policy(page) as check:
+            session.send.side_effect = Error(f"Protocol error (Fetch.failRequest): {reason}")
+            handlers["Fetch.requestPaused"]({"requestId": "visual"})
+            await asyncio.sleep(0)
+            session.send.side_effect = None
+            await check()
+
+    if fails:
+        with pytest.raises(OpinetServerError) as raised:
+            await exercise()
+        assert "cause=Error" in str(raised.value)
+        assert f"reason={reason.split('.')[0].strip()}" in str(raised.value)
+    else:
+        await exercise()
+    assert not handlers
+
+
+def test_protocol_reason_keeps_only_fixed_cdp_wording():
+    assert browser_module._protocol_reason(Error("Protocol error (Fetch.failRequest): Invalid InterceptionId.")) == (
+        "Invalid InterceptionId")
+    assert browser_module._protocol_reason(Error("https://www.opinet.co.kr/x?key=secret")) == "unclassified"
+    assert browser_module._protocol_reason(
+        Error("Protocol error (Fetch.failRequest): bad https://www.opinet.co.kr/?k=v")) == "bad https"
+    # 같은 문구라도 Playwright protocol 오류가 아닌 예외는 무시 대상이 아니다.
+    assert not browser_module._is_stale_interception(
+        RuntimeError("Protocol error (Fetch.failRequest): Invalid InterceptionId."))
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("stuck", ["Fetch.failRequest", "Fetch.disable", "detach"])
 @pytest.mark.parametrize("body_error", ["cancel", "auth", "run_forever"])
