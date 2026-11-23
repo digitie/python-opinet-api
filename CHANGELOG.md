@@ -1,5 +1,20 @@
 # Changelog
 
+
+## 2026-11-23 — 문서 이동이 먼저 폐기한 시각 요청 차단은 실패로 세지 않는다
+
+- 운영 transport(odroid) 유가 수집 2026-11-11~23 정기 run 36건 중 15건이 실패했고 그중 13건이
+  `resource policy failed command=Fetch.failRequest cause=Error`였다. 13건 모두 LPG 탭 수집 중
+  (지역 검색 이동이 반복되는 구간)에 났고, 2026-11-20 수정(#29) 뒤에도 계속됐다(예: 11-21 23:02 재개 run은 LPG 탭
+  시작 18초 만에 실패). cause 클래스가 session 분리(`TargetClosedError`)가 아닌 일반 protocol `Error`이고,
+  실제 Chromium 회귀에서 문서 이동이 만든 오류가 정확히 이 형태(`Invalid InterceptionId`)다.
+- 문서 이동이 Request 단계에서 멈춘 이미지·글꼴 요청을 먼저 폐기하면 늦게 도착한
+  `Fetch.failRequest`는 `Invalid InterceptionId`로 거절된다. 그 요청은 네트워크로 나가지 않았으므로
+  차단 목적은 이미 달성됐다. 이 경우만 실패로 세지 않고 횟수를 INFO 로그로 남긴다.
+- session 분리·`Fetch domain is not enabled`·그 밖의 protocol 오류는 지금처럼 첫 안전 경계에서 실패한다.
+- 실패 문장에 고정 CDP 사유를 `reason=`으로 덧붙인다(URL·헤더·본문은 싣지 않는다). 이번 판정의
+  근거가 추론이었으므로 다음 운영 실패는 사유를 직접 확인할 수 있게 한다.
+
 ## 2026-11-21 — 지정 지역 브라우저 조회
 
 - 기존 시도·시군구 코드로 한 브라우저에서 필요한 지역과 탭만 조회하는 `open_region_search()`를 추가했다.

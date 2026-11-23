@@ -351,9 +351,8 @@ async def test_resource_policy_drains_visual_command_before_disabling_fetch(monk
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("mode", ["detached", "navigation"])
-async def test_resource_policy_real_protocol_failure_stops_before_region_crawl(monkeypatch, mode):
-    """실제 protocol 오류를 숨기지 않고 원인 chain과 함께 첫 안전 경계에서 실패한다."""
+async def test_resource_policy_real_session_detach_stops_before_region_crawl(monkeypatch):
+    """분리된 CDP session은 정책 자체가 깨진 것이다. 원인 chain과 함께 첫 안전 경계에서 실패한다."""
     api = pytest.importorskip("playwright.async_api", reason="browser extra가 필요한 검증")
     async with api.async_playwright() as playwright:
         browser = await playwright.chromium.launch()
@@ -397,17 +396,125 @@ async def test_resource_policy_real_protocol_failure_stops_before_region_crawl(m
                         wait_until="domcontentloaded",
                     )
                     await asyncio.wait_for(entered.wait(), 3)
-                    if mode == "detached":
-                        await session.detach()
-                    else:
-                        await page.goto("about:blank")
+                    await session.detach()
                     release.set()
                     await collector._collect_page(page, None, resource_check=check)
             assert caught and raised.value.__cause__ is caught[0]
+            assert "Invalid InterceptionId" not in str(caught[0])
             assert discovered == []
             assert not page.is_closed()
-            if mode == "navigation":
-                assert "Invalid InterceptionId" in str(caught[0])
+        finally:
+            release.set()
+            await browser.close()
+
+
+@pytest.mark.asyncio
+async def test_resource_policy_logs_ignored_stale_interceptions_on_normal_exit(monkeypatch, caplog):
+    """정상 종료 경로에서는 무시한 무효 차단 횟수를 진단 로그로 남기고 실패하지 않는다."""
+    api = pytest.importorskip("playwright.async_api", reason="browser extra가 필요한 검증")
+    async with api.async_playwright() as playwright:
+        browser = await playwright.chromium.launch()
+        entered = asyncio.Event()
+        release = asyncio.Event()
+        caught = []
+        try:
+            page = await browser.new_page()
+            session = await page.context.new_cdp_session(page)
+            send = session.send
+
+            async def delayed_send(method, params=None):
+                if method == "Fetch.failRequest":
+                    entered.set()
+                    await release.wait()
+                try:
+                    return await send(method, params)
+                except Exception as error:
+                    if method == "Fetch.failRequest":
+                        caught.append(error)
+                    raise
+
+            monkeypatch.setattr(session, "send", delayed_send)
+
+            async def existing_session(_page):
+                return session
+
+            monkeypatch.setattr(page.context, "new_cdp_session", existing_session)
+            caplog.set_level("INFO", logger="opinet.experimental.browser")
+            async with _collection_resource_policy(page):
+                await page.set_content(
+                    '<img src="http://127.0.0.1:1/unused-2.png">',
+                    wait_until="domcontentloaded",
+                )
+                await asyncio.wait_for(entered.wait(), 3)
+                await page.goto("about:blank")
+                release.set()
+            assert caught and "Invalid InterceptionId" in str(caught[0])
+            assert "ignored stale interceptions=1" in caplog.text
+            assert not page.is_closed()
+        finally:
+            release.set()
+            await browser.close()
+
+
+@pytest.mark.asyncio
+async def test_resource_policy_navigation_invalidated_block_continues_crawl(monkeypatch):
+    """문서 이동이 먼저 폐기한 시각 요청의 Invalid InterceptionId는 수집을 멈추지 않는다.
+
+    운영(2026-11-11~23) 유가 수집 실패의 대부분이 LPG 탭 전환·지역 검색 이동과 겹친 이 경합이었다.
+    요청은 Request 단계에서 멈춘 채 버려져 네트워크로 나가지 않았으므로 차단 목적은 달성됐다.
+    """
+    api = pytest.importorskip("playwright.async_api", reason="browser extra가 필요한 검증")
+    async with api.async_playwright() as playwright:
+        browser = await playwright.chromium.launch()
+        entered = asyncio.Event()
+        release = asyncio.Event()
+        caught = []
+        discovered = []
+        try:
+            page = await browser.new_page()
+            session = await page.context.new_cdp_session(page)
+            send = session.send
+
+            async def delayed_send(method, params=None):
+                if method == "Fetch.failRequest":
+                    entered.set()
+                    await release.wait()
+                try:
+                    return await send(method, params)
+                except Exception as error:
+                    if method == "Fetch.failRequest":
+                        caught.append(error)
+                    raise
+
+            monkeypatch.setattr(session, "send", delayed_send)
+
+            async def existing_session(_page):
+                return session
+
+            monkeypatch.setattr(page.context, "new_cdp_session", existing_session)
+            collector = OpinetBrowserCollector()
+
+            class Reached(Exception):
+                pass
+
+            async def discovery_reached(_page):
+                discovered.append(True)
+                raise Reached
+
+            monkeypatch.setattr(collector, "_discover_regions", discovery_reached)
+            with pytest.raises(Reached):
+                async with _collection_resource_policy(page) as check:
+                    await page.set_content(
+                        '<img src="http://127.0.0.1:1/unused.png">',
+                        wait_until="domcontentloaded",
+                    )
+                    await asyncio.wait_for(entered.wait(), 3)
+                    await page.goto("about:blank")
+                    release.set()
+                    await collector._collect_page(page, None, resource_check=check)
+            assert caught and "Invalid InterceptionId" in str(caught[0])
+            assert discovered == [True]
+            assert not page.is_closed()
         finally:
             release.set()
             await browser.close()
